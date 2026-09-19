@@ -74,6 +74,8 @@ class OwnedProcess:
             os.killpg(self.pid, 0)
         except ProcessLookupError:
             return
+        except PermissionError as exc:
+            raise OSError("Post-reap process-group probe was denied") from exc
         raise OSError("Owned process group remains after reaping its exited leader")
 
     def reap(self) -> int:
