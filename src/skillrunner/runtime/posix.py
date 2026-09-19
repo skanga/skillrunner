@@ -68,7 +68,7 @@ class OwnedProcess:
                     self._darwin_exited_group_denied = True
 
     def verify_terminated_group(self) -> None:
-        if not self._darwin_exited_group_denied:
+        if sys.platform == "win32" or not self._darwin_exited_group_denied:
             return
         try:
             os.killpg(self.pid, 0)

@@ -64,7 +64,10 @@ async def test_stdio_catalog_invoke_and_close_from_other_task(tmp_path):
         with pytest.raises(RunnerError, match="mcp_tool_not_allowed"):
             await bridge.invoke("denied", {})
     finally:
-        await asyncio.create_task(bridge.aclose())
+        try:
+            await asyncio.create_task(bridge.aclose())
+        except RunnerError as error:
+            pytest.fail(f"{error.code}: {error.details}")
     assert not supervisor.active
 
 

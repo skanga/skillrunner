@@ -296,7 +296,12 @@ class _Connection:
         except BaseException as exc:
             if exiting:
                 self.close_error = RunnerError(
-                    "mcp_cleanup_failed", "MCP connection cleanup failed."
+                    "mcp_cleanup_failed",
+                    "MCP connection cleanup failed.",
+                    details={
+                        "cause_type": type(exc).__name__,
+                        "cause_code": exc.code if isinstance(exc, RunnerError) else None,
+                    },
                 )
             error = self.failure(exc, dispatched=self.current is not None)
             if not self.ready.done():
