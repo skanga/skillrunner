@@ -301,6 +301,10 @@ class _Connection:
                     details={
                         "cause_type": type(exc).__name__,
                         "cause_code": exc.code if isinstance(exc, RunnerError) else None,
+                        "cause_os_type": (
+                            type(exc.__cause__).__name__ if exc.__cause__ is not None else None
+                        ),
+                        "cause_os_errno": getattr(exc.__cause__, "errno", None),
                     },
                 )
             error = self.failure(exc, dispatched=self.current is not None)

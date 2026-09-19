@@ -56,6 +56,7 @@ async def test_arguments_stdin_and_nonzero(tmp_path):
     assert result.pid > 0
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group signaling")
 async def test_darwin_zombie_only_group_signal_denial_cleans_up(tmp_path, monkeypatch):
     from skillrunner.runtime import posix
 
@@ -75,6 +76,7 @@ async def test_darwin_zombie_only_group_signal_denial_cleans_up(tmp_path, monkey
     assert result.stdout == b"finished\n"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group signaling")
 def test_darwin_live_group_signal_denial_remains_cleanup_failure(tmp_path, monkeypatch):
     from skillrunner.runtime import posix
 
