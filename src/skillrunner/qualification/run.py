@@ -185,12 +185,16 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             "max_steps": args.max_steps,
             "max_tool_calls": args.max_tool_calls,
             "max_tokens": args.max_tokens,
-            "timeout": "3m",
+            "timeout": getattr(args, "timeout", "3m"),
         },
         {},
     )
     settings.diagnostics.log_content = bool(getattr(args, "log_content", False))
     profile = select_model(settings)
+    if args.max_output < 1:
+        raise ValueError("Qualification output cap must be positive")
+    if profile.max_output_tokens is not None:
+        profile.max_output_tokens = min(profile.max_output_tokens, args.max_output)
     rates, cost_basis = qualification_rates(profile)
     result: dict[str, Any] = {
         "schema_version": 1,
@@ -311,6 +315,7 @@ def main() -> None:
     parser.add_argument("--max-tool-calls", type=int, default=20)
     parser.add_argument("--max-tokens", type=int, default=200000)
     parser.add_argument("--max-output", type=int, default=2048)
+    parser.add_argument("--timeout", default="3m", help="Per-run deadline (for example, 9m)")
     args = parser.parse_args()
     result = asyncio.run(evaluate(args))
     if result.get("evidence_status") == "incomplete":

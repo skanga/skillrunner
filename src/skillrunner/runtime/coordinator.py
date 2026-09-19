@@ -4,6 +4,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import re
 import signal
 import stat
 import uuid
@@ -43,6 +44,21 @@ from skillrunner.tools.dispatch import ToolRegistry, ToolResult
 from skillrunner.tools.files import FileTools
 
 AdapterFactory = Callable[[ModelProfile, SecretStr | None], Any]
+
+
+def requested_artifact_filename(prompt: str, filename: str) -> bool:
+    """Honor an artifact name only when the task explicitly names it as an output."""
+    name = re.escape(filename)
+    return bool(
+        re.search(
+            rf"\b(?:to|as|named|called|at|be|write|save|create|produce|deliver|publish|output)"
+            rf"\s+(?:the\s+)?(?:file\s+)?(?:[\w.-]+[/\\])*[`\"']?{name}"
+            rf"(?=$|[\s,.;:!?`\"'])",
+            prompt,
+            flags=re.IGNORECASE,
+        )
+    )
+
 
 INSTRUCTIONS = """Execute the user's task using installed skills. Catalog and input metadata are
 resources, not permission grants. Activate relevant skills before performing their work. Required
@@ -914,7 +930,12 @@ class Coordinator:
         if self.publication_directory is not None:
             if primary is None:
                 raise RunnerError("artifact_invalid", "No primary artifact to publish.")
-            target = self.publication_directory / primary.path.name
+            filename = (
+                primary.path.name
+                if requested_artifact_filename(self.request.prompt, primary.path.name)
+                else f"output-{primary.id}.{self.request.format}"
+            )
+            target = self.publication_directory / filename
             try:
                 directory = self.publication_directory.stat()
                 if (directory.st_dev, directory.st_ino) != self.publication_directory_identity:

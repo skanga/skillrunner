@@ -51,6 +51,7 @@ max_output_tokens = 128000
         max_tool_calls=20,
         max_tokens=200000,
         max_output=2048,
+        timeout="9m",
     )
     if corpus_track:
         document = json.loads(cases.read_text())
@@ -101,9 +102,13 @@ max_output_tokens = 128000
         )
         args.track = corpus_track
     invocations = []
+    observed_timeouts = []
+    observed_output_caps = []
 
     async def task(request, settings, **kwargs):
         invocations.append(request)
+        observed_timeouts.append(settings.limits.timeout)
+        observed_output_caps.append(settings.models["luna"].max_output_tokens)
         manifest = tmp_path / f"manifest-{len(invocations)}.json"
         manifest.write_text(json.dumps({"provenance": {"activated_skills": [{"name": "writer"}]}}))
         output = tmp_path / f"answer-{len(invocations)}.md"
@@ -117,6 +122,8 @@ max_output_tokens = 128000
     monkeypatch.setattr(run, "run_with_signals", task)
     result = await run.evaluate(args)
     assert len(invocations) == 3
+    assert observed_timeouts == [540.0] * 3
+    assert observed_output_caps == [2048] * 3
     assert invocations[0].required_skills == (["writer"] if corpus_track == "explicit" else [])
     if corpus_track:
         assert len(result["corpus"]["population"]) == 1

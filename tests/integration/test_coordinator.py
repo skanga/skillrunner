@@ -67,7 +67,14 @@ def finish(outcome="succeeded", **kwargs):
 
 
 async def run(
-    tmp_path, calls, *, skills=("writer",), skill_exists=True, output=None, overrides=None
+    tmp_path,
+    calls,
+    *,
+    skills=("writer",),
+    skill_exists=True,
+    output=None,
+    overrides=None,
+    prompt="Write an answer",
 ):
     settings = fixture(tmp_path, skill=skill_exists)
     if overrides:
@@ -81,7 +88,7 @@ async def run(
 
     receipt = await api().run_task(
         RunRequest(
-            prompt="Write an answer",
+            prompt=prompt,
             invocation_directory=tmp_path,
             required_skills=list(skills),
             output=output,
@@ -443,13 +450,47 @@ async def test_generated_primary_is_retained_validated_and_published(tmp_path):
     assert Path(receipt["artifact_paths"][0]).read_text() == "generated output"
 
 
-async def test_output_directory_uses_primary_artifact_filename(tmp_path):
+async def test_output_directory_uses_filename_requested_in_prompt(tmp_path):
     output = tmp_path / "published.json"
     output.mkdir()
-    receipt, _ = await run(tmp_path, [*artifact_calls(), finish()], output=output)
+    receipt, _ = await run(
+        tmp_path, [*artifact_calls(), finish()], output=output, prompt="Write to report.md"
+    )
     assert receipt["status"] == "succeeded"
     assert receipt["primary_output"] == str(output / "report.md")
     assert (output / "report.md").read_text() == "generated output"
+
+
+async def test_output_directory_generates_unique_name_for_unnamed_artifact(tmp_path):
+    output = tmp_path / "published"
+    output.mkdir()
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    first_root.mkdir()
+    second_root.mkdir()
+    first, _ = await run(first_root, [*artifact_calls(), finish()], output=output)
+    second, _ = await run(second_root, [*artifact_calls(), finish()], output=output)
+    for receipt in (first, second):
+        assert receipt["status"] == "succeeded"
+        primary = Path(receipt["primary_output"])
+        assert primary.parent == output
+        assert primary.name.startswith("output-")
+        assert primary.suffix == ".md"
+        assert primary.read_text() == "generated output"
+    assert first["primary_output"] != second["primary_output"]
+
+
+async def test_output_directory_does_not_treat_input_filename_as_output_request(tmp_path):
+    output = tmp_path / "published"
+    output.mkdir()
+    receipt, _ = await run(
+        tmp_path,
+        [*artifact_calls(), finish()],
+        output=output,
+        prompt="Read report.md as input and write a summary.",
+    )
+    assert receipt["status"] == "succeeded"
+    assert Path(receipt["primary_output"]).name.startswith("output-")
 
 
 async def test_output_directory_generates_unique_text_answer_filename(tmp_path):
@@ -475,7 +516,9 @@ async def test_output_directory_preserves_existing_named_file_without_overwrite(
     output.mkdir()
     existing = output / "report.md"
     existing.write_text("keep me")
-    receipt, _ = await run(tmp_path, [*artifact_calls(), finish()], output=output)
+    receipt, _ = await run(
+        tmp_path, [*artifact_calls(), finish()], output=output, prompt="Write to report.md"
+    )
     assert receipt["status"] == "failed"
     assert receipt["errors"][0]["code"] == "publication_failed"
     assert existing.read_text() == "keep me"
