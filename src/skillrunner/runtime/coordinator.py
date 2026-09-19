@@ -66,9 +66,10 @@ skills must all be activated; additional skills are allowed. Activation of a new
 separate tool response before actions based on its instructions. Use only supplied tools and roots.
 Select the minimum set of skills needed to perform the requested operations. Do not activate an
 extra skill solely because its name matches an output format or a reference artifact. When skills
-overlap, prefer the one whose description most directly matches the user's goal. When the task is
-to test a supplied local web app, prefer a local-web-app testing skill over a general
-browser-automation skill, even if the prompt names the browser technology.
+overlap, prefer the one whose description most directly matches the user's goal. When a task
+explicitly requires a tool's CLI or wrapper, prefer the skill for that tool.
+Otherwise, when testing a supplied local web app, prefer a local-web-app testing skill over a
+general browser-automation skill, even if the prompt names the browser technology.
 Do not install dependencies or request human interaction. Do not invent paths outside the workspace.
 File tools accept paths such as scratch/answer.md, artifacts/data.csv, input-1/source.txt,
 or absolute paths inside the registered roots. Root names are directory prefixes, not URI schemes.
