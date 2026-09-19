@@ -151,6 +151,12 @@ class ProcessSupervisor:
             returncode = await child.wait()
             child.native.reap()
             reaped = True
+            verify_group = getattr(child.native, "verify_terminated_group", None)
+            if verify_group is not None:
+                try:
+                    verify_group()
+                except OSError as exc:
+                    errors.append(exc)
             if child.drainers:
                 done, pending = await asyncio.wait(child.drainers, timeout=1)
                 for task in pending:

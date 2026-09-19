@@ -8,6 +8,8 @@ from contextlib import suppress
 from pathlib import Path
 from typing import IO
 
+IS_DARWIN = sys.platform == "darwin"
+
 
 class OwnedProcess:
     def __init__(
@@ -36,6 +38,7 @@ class OwnedProcess:
         self.stdin: IO[bytes] | None = self.process.stdin
         self.stdout: IO[bytes] = self.process.stdout  # type: ignore[assignment]
         self.stderr: IO[bytes] = self.process.stderr  # type: ignore[assignment]
+        self._darwin_exited_group_denied = False
 
     def poll(self) -> int | None:
         if sys.platform == "win32":
@@ -53,7 +56,25 @@ class OwnedProcess:
             raise OSError("POSIX process ownership is unavailable on Windows")
         else:
             with suppress(ProcessLookupError):
-                os.killpg(self.pid, signal.SIGKILL if force else signal.SIGTERM)
+                try:
+                    os.killpg(self.pid, signal.SIGKILL if force else signal.SIGTERM)
+                except PermissionError:
+                    # Darwin can report EPERM for a group containing only its
+                    # unreaped, already-exited leader. Keep the leader unreaped
+                    # until the normal cleanup boundary, then verify the group
+                    # disappears after reaping it.
+                    if not IS_DARWIN or self.poll() is None:
+                        raise
+                    self._darwin_exited_group_denied = True
+
+    def verify_terminated_group(self) -> None:
+        if not self._darwin_exited_group_denied:
+            return
+        try:
+            os.killpg(self.pid, 0)
+        except ProcessLookupError:
+            return
+        raise OSError("Owned process group remains after reaping its exited leader")
 
     def reap(self) -> int:
         return self.process.wait()

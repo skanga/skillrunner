@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import shutil
+import signal
 import sys
 import time
 from pathlib import Path
@@ -53,6 +54,52 @@ async def test_arguments_stdin_and_nonzero(tmp_path):
     assert lines[1] == "0"
     assert result.returncode == 7
     assert result.pid > 0
+
+
+async def test_darwin_zombie_only_group_signal_denial_cleans_up(tmp_path, monkeypatch):
+    from skillrunner.runtime import posix
+
+    monkeypatch.setattr(posix, "IS_DARWIN", True, raising=False)
+    real_killpg = os.killpg
+
+    def darwin_killpg(pid, selected_signal):
+        if selected_signal in (signal.SIGTERM, signal.SIGKILL):
+            status = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            if status is not None:
+                raise PermissionError(1, "Zombie-only process group")
+        return real_killpg(pid, selected_signal)
+
+    monkeypatch.setattr(posix.os, "killpg", darwin_killpg)
+    result = await invoke(tmp_path, "print('finished')")
+    assert result.returncode == 0
+    assert result.stdout == b"finished\n"
+
+
+def test_darwin_live_group_signal_denial_remains_cleanup_failure(tmp_path, monkeypatch):
+    from skillrunner.runtime import posix
+
+    monkeypatch.setattr(posix, "IS_DARWIN", True, raising=False)
+    child = posix.OwnedProcess(
+        sys.executable,
+        ["-c", "import time; time.sleep(60)"],
+        cwd=tmp_path,
+        environment=dict(os.environ),
+        stdin_pipe=False,
+    )
+    real_killpg = os.killpg
+
+    def deny(_pid, _signal):
+        raise PermissionError(1, "denied")
+
+    try:
+        monkeypatch.setattr(posix.os, "killpg", deny)
+        with pytest.raises(PermissionError):
+            child.terminate(force=True)
+    finally:
+        monkeypatch.setattr(posix.os, "killpg", real_killpg)
+        child.terminate(force=True)
+        child.reap()
+        child.close()
 
 
 @pytest.mark.parametrize("outcome", ["normal", "timeout", "cancel"])
