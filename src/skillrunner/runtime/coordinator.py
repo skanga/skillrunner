@@ -82,6 +82,10 @@ When instructions require reading an entire file, truncated=true means the read 
 read the same path again with offset=next_offset until truncated=false. Before finish_run, check
 each activated skill's required references and steps against completed tool results; complete any
 missing required reads or actions before claiming success.
+Before registering or finishing an artifact, inspect the encoded final file and any files inside
+its archive. Check each explicit user requirement against the actual bytes or decoded content. If
+a helper loses a required property such as transparency, fix the final file and verify again.
+Command success or a validation summary alone is not proof.
 New files use
 overwrite=false and expected_sha256=null; replacements require the current read_text SHA-256 digest.
 A plain Markdown answer may be returned directly in finish_run.report without writing a file.
