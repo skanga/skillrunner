@@ -76,6 +76,8 @@ absolute paths in generated_roots for command arguments that refer to output fil
 Register command-generated files using the same absolute paths used to create them.
 Resolve skill-relative references under the package_root returned by activate_skill. Read reference
 files required by the activated instructions with read_text before completing their task.
+For source reviews, read the task-relevant guidance, including security, accessibility, or styling
+references when the request concerns those topics; do not cite a reference you have not read.
 When instructions require reading an entire file, truncated=true means the read is incomplete:
 read the same path again with offset=next_offset until truncated=false. Before finish_run, check
 each activated skill's required references and steps against completed tool results; complete any
@@ -83,6 +85,8 @@ missing required reads or actions before claiming success.
 New files use
 overwrite=false and expected_sha256=null; replacements require the current read_text SHA-256 digest.
 A plain Markdown answer may be returned directly in finish_run.report without writing a file.
+In that case, report must contain the complete requested deliverable itself; a statement that the
+deliverable was created is not a substitute for its content.
 Host commands have ordinary OS access, not sandbox isolation. Do not disclose credentials or private
 reasoning. Register generated artifacts, then submit finish_run with the requested outcome, public
 report, primary artifact ID and secondary IDs. Record any low-impact assumptions in
