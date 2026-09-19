@@ -661,6 +661,65 @@ async def test_run_command_defaults_to_unique_active_skill_snapshot(tmp_path):
     assert receipt["status"] == "succeeded", receipt["errors"]
 
 
+async def test_run_command_explains_environment_reference_shape_and_can_retry(tmp_path):
+    import os
+    import sys
+
+    executable = str(Path(sys.executable).resolve())
+    settings = fixture(tmp_path)
+    settings.policy.allowed_executables = [executable]
+    executable_stat = Path(executable).stat()
+    settings.policy.executable_identities[executable] = (
+        executable_stat.st_dev,
+        executable_stat.st_ino,
+        executable_stat.st_size,
+        executable_stat.st_mtime_ns,
+    )
+    settings.policy.command_env = {executable: {"PATH": "TEST_COMMAND_PATH"}}
+
+    def retry(messages):
+        response = json.dumps(messages)
+        assert "child variable name" in response
+        assert "omit env_refs" in response
+        return [
+            call(
+                "run_command",
+                {
+                    "executable": executable,
+                    "argv": ["-c", "print('ok')"],
+                },
+                id="retry",
+            )
+        ]
+
+    calls = [
+        [
+            call(
+                "run_command",
+                {"executable": executable, "argv": ["-V"], "env_refs": {executable: "PATH"}},
+            )
+        ],
+        retry,
+        finish(),
+    ]
+    receipt = await api().run_task(
+        RunRequest(prompt="Write", invocation_directory=tmp_path, required_skills=["writer"]),
+        settings,
+        environ={"TEST_COMMAND_PATH": os.environ["PATH"]},
+        adapter_factory=lambda profile, key: Adapter(profile, calls),
+    )
+
+    assert receipt["status"] == "succeeded"
+    events = [
+        json.loads(line)
+        for line in Path(receipt["report_path"]).with_name("events.jsonl").read_text().splitlines()
+    ]
+    assert any(
+        event["event_type"] == "tool_completed" and event["payload"].get("call_id") == "retry"
+        for event in events
+    )
+
+
 async def test_run_command_without_cwd_rejects_ambiguous_active_skills(tmp_path):
     import sys
 

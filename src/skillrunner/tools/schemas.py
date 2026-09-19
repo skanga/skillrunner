@@ -78,7 +78,15 @@ class RunCommandArgs(ToolArgs):
             "Absolute generated-root directory for output work; omitted means the skill package."
         ),
     )
-    env_refs: dict[str, str] = Field(default_factory=dict)
+    env_refs: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Optional child environment references: each key is a child variable name "
+            "such as PATH, and each value is its configured host reference name. "
+            "Omit env_refs to use the executable's configured environment. "
+            "Executable paths are not variable names."
+        ),
+    )
     timeout: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
 

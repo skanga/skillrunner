@@ -672,7 +672,9 @@ class Coordinator:
             ):
                 raise RunnerError(
                     "command_not_allowed",
-                    "Configure these references in policy.command_env for this executable.",
+                    "env_refs must map each child variable name to its configured host "
+                    "reference for this executable; omit env_refs to use its configured "
+                    "environment.",
                 )
             requested_cwd = values["cwd"]
             if requested_cwd is None:
