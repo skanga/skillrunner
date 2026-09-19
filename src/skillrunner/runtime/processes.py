@@ -8,6 +8,7 @@ and output consumption through open(); that path does not capture protocol bytes
 """
 
 import asyncio
+import errno
 import math
 import os
 from collections.abc import AsyncIterator, Callable, Sequence
@@ -135,7 +136,15 @@ class ProcessSupervisor:
         try:
             child.native.terminate(force=False)
         except OSError as exc:
-            errors.append(exc)
+            # Darwin may deny a cooperative group signal during child exit.
+            # A subsequent successful force request and group check recover
+            # this race; other cooperative failures remain observable.
+            if not (
+                getattr(child.native, "is_darwin", False)
+                and isinstance(exc, PermissionError)
+                and exc.errno == errno.EPERM
+            ):
+                errors.append(exc)
         # Preserve the full independent grace for descendants, even when
         # the group leader has exited and closed all of its pipes.
         await asyncio.sleep(self.shutdown_grace)

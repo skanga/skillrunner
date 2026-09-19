@@ -1,6 +1,7 @@
 """Real owned children exercise bounded pipes and process-tree cleanup."""
 
 import asyncio
+import errno
 import json
 import os
 import shutil
@@ -71,6 +72,24 @@ async def test_darwin_zombie_only_group_signal_denial_cleans_up(tmp_path, monkey
         return real_killpg(pid, selected_signal)
 
     monkeypatch.setattr(posix.os, "killpg", darwin_killpg)
+    result = await invoke(tmp_path, "print('finished')")
+    assert result.returncode == 0
+    assert result.stdout == b"finished\n"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group signaling")
+async def test_darwin_graceful_eperm_is_recovered_by_forced_cleanup(tmp_path, monkeypatch):
+    from skillrunner.runtime import posix
+
+    monkeypatch.setattr(posix, "IS_DARWIN", True)
+    original = posix.OwnedProcess.terminate
+
+    def deny_graceful(self, *, force):
+        if not force:
+            raise PermissionError(errno.EPERM, "Native group signal denied")
+        return original(self, force=force)
+
+    monkeypatch.setattr(posix.OwnedProcess, "terminate", deny_graceful)
     result = await invoke(tmp_path, "print('finished')")
     assert result.returncode == 0
     assert result.stdout == b"finished\n"

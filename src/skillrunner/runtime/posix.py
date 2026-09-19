@@ -38,6 +38,7 @@ class OwnedProcess:
         self.stdin: IO[bytes] | None = self.process.stdin
         self.stdout: IO[bytes] = self.process.stdout  # type: ignore[assignment]
         self.stderr: IO[bytes] = self.process.stderr  # type: ignore[assignment]
+        self.is_darwin = IS_DARWIN
         self._darwin_exited_group_denied = False
 
     def poll(self) -> int | None:
