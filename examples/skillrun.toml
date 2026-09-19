@@ -1,0 +1,70 @@
+# Copy to ./skillrun.toml and edit the model profile before running a task.
+schema_version = 1
+skills_dir = "./skills"
+output_dir = "./outputs"
+default_model = "local"
+
+[models.local]
+base_url = "http://localhost:8000/v1"
+model = "replace-with-your-model-id"
+auth_mode = "none"
+# These are examples, not claims about your model. Use its documented capacities.
+context_window_tokens = 32768
+max_output_tokens = 4096
+output_token_parameter = "max_tokens"
+# For authentication: auth_mode = "bearer" and api_key_env = "MODEL_API_KEY".
+# Store the credential in that environment variable, never in this file.
+
+# Optional metadata mapping; paths are relative to base_url, keys are dotted paths.
+# [models.local.discovery]
+# path = "models/replace-with-your-model-id"
+# context_window_field = "limits.context"
+# max_output_field = "limits.output"
+
+# Used only with --base-url / OPENAI_BASE_URL and a literal --model identifier.
+# These settings are independent of named profiles.
+[direct_model]
+auth_mode = "none"
+context_window_tokens = 32768
+max_output_tokens = 4096
+
+[limits]
+timeout = "10m"
+shutdown_grace = "5s"
+max_steps = 40
+max_tool_calls = 100
+max_tokens = 100000
+# Retry transient model transport failures once; set to 0 to disable.
+model_transport_retries = 1
+
+[policy]
+# Empty permits no commands. Add only installed executables your skills need.
+# Examples: ["python3", "node"] or absolute executable paths.
+allowed_executables = []
+
+# Explicit child environment references, keyed by the configured executable.
+# [policy.command_env.python3]
+# SERVICE_TOKEN = "MY_SERVICE_TOKEN"
+
+[diagnostics]
+log_content = false
+retain_work = false
+redact_env = []
+
+# Model Context Protocol (MCP) examples: enable only tools you intend to expose.
+# [mcp.documents]
+# transport = "streamable-http"
+# url = "https://your-service.example/mcp"
+# allowed_tools = ["search_documents"]
+# [mcp.documents.headers]
+# Authorization = "DOCUMENTS_AUTH_HEADER"
+# The referenced variable holds the complete header value, e.g. Bearer <token>.
+
+# A stdio server's executable must also appear in policy.allowed_executables.
+# [mcp.local]
+# transport = "stdio"
+# command = "python3"
+# args = ["/absolute/path/to/server.py"]
+# allowed_tools = ["lookup"]
+# [mcp.local.env]
+# SERVICE_TOKEN = "MY_SERVICE_TOKEN"

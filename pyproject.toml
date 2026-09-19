@@ -1,0 +1,46 @@
+[build-system]
+requires = ["uv_build==0.12.5"]
+build-backend = "uv_build"
+
+[project]
+name = "skillrunner"
+version = "0.1.0"
+description = "One-shot runner for standard Agent Skills packages"
+requires-python = ">=3.13"
+dependencies = [
+  "typer>=0.16,<1",
+  "pydantic>=2.11,<3",
+  "pydantic-settings>=2.10,<3",
+  "openai>=2,<3",
+  "ruamel.yaml>=0.18,<0.19",
+  "mcp>=2.2,<3",
+]
+
+[project.scripts]
+skillrun = "skillrunner.cli.app:main"
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "pytest-asyncio>=1,<2", "ruff>=0.12,<1", "mypy>=1.17,<2"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--import-mode=importlib"
+asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+# Retained outputs and executed probe snapshots are immutable qualification evidence.
+extend-exclude = [
+  "docs/qualification/*-evidence",
+  "docs/qualification/windows-cli-concurrency-py313",
+  "docs/qualification/windows-cli-concurrency-py314",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+files = ["src/skillrunner"]

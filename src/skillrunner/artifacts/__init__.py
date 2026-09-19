@@ -1,0 +1,1 @@
+"""Artifact validation and publication."""
