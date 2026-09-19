@@ -40,6 +40,7 @@ class OwnedProcess:
         self.stderr: IO[bytes] = self.process.stderr  # type: ignore[assignment]
         self.is_darwin = IS_DARWIN
         self._darwin_exited_group_denied = False
+        self._darwin_direct_signal = False
 
     def poll(self) -> int | None:
         if sys.platform == "win32":
@@ -60,6 +61,13 @@ class OwnedProcess:
                 try:
                     os.killpg(self.pid, signal.SIGKILL if force else signal.SIGTERM)
                 except PermissionError:
+                    if IS_DARWIN and force:
+                        # The group signal can be denied even for our live
+                        # leader. Signal that still-owned PID directly, then
+                        # require the entire group to disappear after reaping.
+                        self._darwin_direct_signal = True
+                        os.kill(self.pid, signal.SIGKILL)
+                        return
                     # Darwin can report EPERM for a group containing only its
                     # unreaped, already-exited leader. Keep the leader unreaped
                     # until the normal cleanup boundary, then verify the group
@@ -69,7 +77,9 @@ class OwnedProcess:
                     self._darwin_exited_group_denied = True
 
     def verify_terminated_group(self) -> None:
-        if sys.platform == "win32" or not self._darwin_exited_group_denied:
+        if sys.platform == "win32" or not (
+            self._darwin_exited_group_denied or self._darwin_direct_signal
+        ):
             return
         try:
             os.killpg(self.pid, 0)

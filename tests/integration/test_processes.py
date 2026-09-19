@@ -96,6 +96,42 @@ async def test_darwin_graceful_eperm_is_recovered_by_forced_cleanup(tmp_path, mo
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group signaling")
+def test_darwin_force_group_denial_kills_leader_and_verifies_group(tmp_path, monkeypatch):
+    from skillrunner.runtime import posix
+
+    monkeypatch.setattr(posix, "IS_DARWIN", True)
+    child = posix.OwnedProcess(
+        sys.executable,
+        ["-c", "import time; time.sleep(60)"],
+        cwd=tmp_path,
+        environment=dict(os.environ),
+        stdin_pipe=False,
+    )
+    real_killpg = os.killpg
+
+    def deny_group_force(pid, selected_signal):
+        if selected_signal == signal.SIGKILL:
+            raise PermissionError(errno.EPERM, "Group signal denied")
+        return real_killpg(pid, selected_signal)
+
+    try:
+        monkeypatch.setattr(posix.os, "killpg", deny_group_force)
+        child.terminate(force=True)
+        deadline = time.monotonic() + 2
+        while child.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert child.poll() is not None
+        child.reap()
+        child.verify_terminated_group()
+    finally:
+        monkeypatch.setattr(posix.os, "killpg", real_killpg)
+        if child.process.poll() is None:
+            child.terminate(force=True)
+        child.reap()
+        child.close()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group signaling")
 def test_darwin_live_group_signal_denial_remains_cleanup_failure(tmp_path, monkeypatch):
     from skillrunner.runtime import posix
 
@@ -108,16 +144,19 @@ def test_darwin_live_group_signal_denial_remains_cleanup_failure(tmp_path, monke
         stdin_pipe=False,
     )
     real_killpg = os.killpg
+    real_kill = os.kill
 
     def deny(_pid, _signal):
         raise PermissionError(1, "denied")
 
     try:
         monkeypatch.setattr(posix.os, "killpg", deny)
+        monkeypatch.setattr(posix.os, "kill", deny)
         with pytest.raises(PermissionError):
             child.terminate(force=True)
     finally:
         monkeypatch.setattr(posix.os, "killpg", real_killpg)
+        monkeypatch.setattr(posix.os, "kill", real_kill)
         child.terminate(force=True)
         child.reap()
         child.close()
