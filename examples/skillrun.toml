@@ -12,9 +12,9 @@ auth_mode = "none"
 context_window_tokens = 32768
 max_output_tokens = 4096
 output_token_parameter = "max_tokens"
-# The default is text only. Add another modality only when the endpoint and
-# runner have a supported accounting path for it.
-input_modalities = ["text"]
+# When neither configuration nor endpoint metadata supplies modalities, the
+# runner defaults to text. Uncomment only after confirming endpoint support.
+# input_modalities = ["text"]
 # For authentication: auth_mode = "bearer" and api_key_env = "MODEL_API_KEY".
 # Store the credential in that environment variable, never in this file.
 # Optional endpoint-specific inference options; use only supported keys.
