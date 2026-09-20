@@ -807,6 +807,38 @@ async def test_exhausted_turn_budget_preserves_completed_artifact_work(tmp_path)
     assert Path(receipt["artifact_paths"][0]).read_text() == "generated output"
 
 
+async def test_artifact_storage_exhaustion_preserves_existing_publication_and_report(tmp_path):
+    fixture(tmp_path)
+    config = tmp_path / "skillrun.toml"
+    config.write_text(config.read_text() + "\n[storage]\nmax_artifact_bytes = 1\n")
+    settings = resolve_settings(tmp_path, {}, {})
+    output = tmp_path / "published.txt"
+    output.write_text("previous output")
+
+    receipt = await api().run_task(
+        RunRequest(
+            prompt="Write a report",
+            invocation_directory=tmp_path,
+            required_skills=["writer"],
+            output=output,
+            overwrite=True,
+        ),
+        settings,
+        environ={},
+        adapter_factory=lambda profile, key: Adapter(profile, [*artifact_calls(), finish()]),
+    )
+
+    assert receipt["status"] == "limit_exceeded"
+    assert receipt["exit_code"] != 0
+    assert receipt["errors"][0]["code"] == "budget_exhausted"
+    assert output.read_text() == "previous output"
+    assert Path(receipt["report_path"]).is_file()
+    manifest = json.loads(Path(receipt["manifest_path"]).read_text())
+    assert manifest["lifecycle"]["status"] == "limit_exceeded"
+    assert manifest["lifecycle"]["cleanup"]["work_retained"] is True
+    assert (Path(receipt["manifest_path"]).parent / "work").is_dir()
+
+
 async def test_input_snapshots_have_distinct_logical_roots(tmp_path):
     settings = fixture(tmp_path)
     sources = []
