@@ -5,6 +5,7 @@ import json
 import sys
 from pathlib import Path
 
+from skillrunner.config.sources import resolve_settings
 from skillrunner.domain.request import RunRequest
 from skillrunner.runtime.coordinator import run_task
 from tests.integration.test_coordinator import Adapter, call, finish, fixture
@@ -114,6 +115,104 @@ async def test_skill_reference_and_template_produce_output_without_changing_pack
         "audience": "team",
     }
     assert {path: path.read_bytes() for path in original} == original
+
+
+async def test_script_reads_input_directory_snapshot_and_publishes_to_output_directory(tmp_path):
+    fixture(tmp_path)
+    executable = str(Path(sys.executable).resolve())
+    config = tmp_path / "skillrun.toml"
+    config.write_text(
+        config.read_text() + "\n[policy]\nallowed_executables = " + json.dumps([executable]) + "\n"
+    )
+    settings = resolve_settings(tmp_path, {}, {})
+    source = tmp_path / "source"
+    source.mkdir()
+    source_file = source / "message.txt"
+    source_file.write_text("Original input")
+    publication = tmp_path / "published"
+    publication.mkdir()
+    package = settings.skills_dir / "writer"
+    script = package / "scripts" / "transform.py"
+    script.parent.mkdir()
+    script.write_text(
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "value = Path(sys.argv[1]).read_text()\n"
+        "Path(sys.argv[2]).write_text(json.dumps({'message': value}))\n"
+    )
+    (package / "SKILL.md").write_text(
+        "---\nname: writer\ndescription: Transform a text input into JSON.\n---\n"
+        "Run scripts/transform.py with the input snapshot and generated output paths."
+    )
+
+    def invoke_script(messages):
+        capabilities = json.loads(
+            messages[0]["content"].split("Run capabilities and requirements:\n", 1)[1]
+        )
+        active = json.loads(messages[2]["content"].split("\n", 1)[1])["active_skills"]
+        script_snapshot = Path(active[0]["package_root"]) / "scripts/transform.py"
+        input_snapshot = Path(capabilities["input_roots"]["input-1"]) / "message.txt"
+        scratch = Path(capabilities["generated_roots"]["scratch"])
+        source_file.write_text("Changed after snapshot")
+        return [
+            call(
+                "run_command",
+                {
+                    "executable": executable,
+                    "argv": [
+                        str(script_snapshot),
+                        str(input_snapshot),
+                        str(scratch / "result.json"),
+                    ],
+                    "cwd": str(scratch),
+                },
+                "script",
+            )
+        ]
+
+    def register_output(messages):
+        result = json.loads([item for item in messages if item["role"] == "tool"][-1]["content"])
+        assert result["ok"] and result["value"]["returncode"] == 0
+        return [
+            call(
+                "register_artifact",
+                {
+                    "path": "scratch/result.json",
+                    "format": "json",
+                    "role": "primary",
+                    "description": "Transformed input",
+                },
+                "register",
+            )
+        ]
+
+    def complete(messages):
+        result = json.loads([item for item in messages if item["role"] == "tool"][-1]["content"])
+        return finish(primary_artifact_id=result["value"]["id"])
+
+    receipt = await run_task(
+        RunRequest(
+            prompt="Transform the supplied input with the writer script",
+            invocation_directory=tmp_path,
+            inputs=[source],
+            output=publication,
+            required_skills=["writer"],
+            format="json",
+        ),
+        settings,
+        environ={},
+        adapter_factory=lambda profile, key: Adapter(
+            profile, [invoke_script, register_output, complete]
+        ),
+    )
+
+    assert receipt["status"] == "succeeded", receipt["errors"]
+    primary = Path(receipt["primary_output"])
+    assert primary.parent == publication
+    assert primary.name.startswith("output-") and primary.suffix == ".json"
+    assert json.loads(primary.read_text()) == {"message": "Original input"}
+    assert source_file.read_text() == "Changed after snapshot"
+    assert script.read_text().startswith("import json, sys")
 
 
 async def test_multiple_registered_outputs_are_all_preserved_and_linked(tmp_path):
