@@ -32,3 +32,5 @@ jobs:
         run: uv run --locked pytest
       - name: Smoke test installed command
         run: uv run --locked skillrun run --help
+      - name: Qualify isolated source and wheel installations
+        run: uv run --locked python scripts/qualification_install_probe.py
