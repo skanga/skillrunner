@@ -102,6 +102,47 @@ async def run(
     return receipt, adapters
 
 
+async def test_external_page_id_in_finish_proposal_can_be_corrected(tmp_path):
+    def corrected_finish(messages):
+        prior = json.loads(messages[-1]["content"])
+        assert prior["name"] == "finish_run"
+        assert prior["ok"] is False
+        assert prior["error"]["code"] == "artifact_invalid"
+        return [
+            call(
+                "finish_run",
+                {
+                    "outcome": "succeeded",
+                    "report": "Created page fixture-page-0001. Both pilots were reviewed.",
+                },
+                "3",
+            )
+        ]
+
+    receipt, adapters = await run(
+        tmp_path,
+        [
+            [call("activate_skill", {"name": "writer", "reason": "Write summary"}, "1")],
+            [
+                call(
+                    "finish_run",
+                    {
+                        "outcome": "succeeded",
+                        "report": "Created page fixture-page-0001. Both pilots were reviewed.",
+                        "primary_artifact_id": "fixture-page-0001",
+                    },
+                    "2",
+                )
+            ],
+            corrected_finish,
+        ],
+    )
+    assert receipt["status"] == "succeeded"
+    assert receipt["primary_output"] is not None
+    assert "fixture-page-0001" in Path(receipt["primary_output"]).read_text()
+    assert len(adapters[0].requests) == 3
+
+
 async def test_no_catalog_finishes_locally_with_durable_failure(tmp_path):
     receipt, adapters = await run(tmp_path, [], skills=(), skill_exists=False)
     assert receipt["status"] == "no_matching_skill"
