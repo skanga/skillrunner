@@ -87,6 +87,7 @@ Short aliases are case-sensitive. Repeated input and skill options accumulate in
 | `--max-steps` | Model-turn limit; default `40` |
 | `--max-tool-calls` | Aggregate tool-call limit; default `100` |
 | `--max-tokens` | Aggregate input/output token budget; default `100000` |
+| `--model-transport-retries` | Retries for transient read-only model transport failures; default `1` |
 | `--shutdown-grace` | Child shutdown grace; default `5s` |
 | `--overwrite` | Allow replacing the explicitly requested primary output |
 | `-j, --json` | One terminal JSON receipt on stdout |
@@ -121,11 +122,15 @@ The adapter uses Chat Completions and preserves the endpoint path prefix. It doe
 
 Provide `context_window_tokens` and `max_output_tokens` from the model's documented limits, or configure `[models.<alias>.discovery]` with an endpoint-relative `path` and dotted `context_window_field` / `max_output_field` mappings. The adapter probes model metadata but does not assume every service exposes capacity fields. Missing capacities block execution rather than guessing. Configured values take precedence over discovered values. Set `output_token_parameter` to `max_tokens` or `max_completion_tokens` as required by the endpoint.
 
+[examples/skillrun.toml](examples/skillrun.toml) shows all supported top-level sections: model profiles, direct-model settings, limits, storage, policy, MCP, artifact validators, and diagnostics. Optional inference options belong in `[models.<alias>.request_options]` or `[direct_model.request_options]`. In version one, `read_media` returns `unsupported_capability`: no media representation and token-accounting path is integrated. Declaring an image or audio modality alone does not change that. Use provisioned extraction tools where appropriate; text byte estimates are not applied to images or audio.
+
 The conversation and skill instructions must fit the context window. The runner does not silently truncate instructions, summarize history, or discard earlier turns to continue. Task requests require model tool calling; incompatible responses produce a failure instead of fabricated execution.
 
 ## Files, host execution, and connectors
 
 Inputs and activated packages are snapshotted and read-only through runner-managed file tools. Paths mentioned only in a prompt do not grant file access; pass files with `--input`. Put output locations outside input trees. In particular, `--input .` conflicts with default `./outputs`; choose a separate `--output-dir` and, if supplied, `--output`.
+
+With no `-i/--input`, the run receives no input snapshot. With no `-o/--output`, the primary deliverable stays in its run bundle under `./outputs` by default.
 
 **Host scripts are not sandboxed.** They run with the host user's filesystem and network access. Runner-managed path checks and executable allowlists govern dispatch but cannot contain a script after launch. Run only trusted packages. Container isolation is deferred.
 
