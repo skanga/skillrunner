@@ -87,6 +87,7 @@ Short aliases are case-sensitive. Repeated input and skill options accumulate in
 | `--max-steps` | Model-turn limit; default `40` |
 | `--max-tool-calls` | Aggregate tool-call limit; default `100` |
 | `--max-tokens` | Aggregate input/output token budget; default `100000` |
+| `--model-transport-retries` | Retries for transient read-only model transport failures; default `1` |
 | `--shutdown-grace` | Child shutdown grace; default `5s` |
 | `--overwrite` | Allow replacing the explicitly requested primary output |
 | `-j, --json` | One terminal JSON receipt on stdout |
@@ -128,6 +129,8 @@ The conversation and skill instructions must fit the context window. The runner 
 ## Files, host execution, and connectors
 
 Inputs and activated packages are snapshotted and read-only through runner-managed file tools. Paths mentioned only in a prompt do not grant file access; pass files with `--input`. Put output locations outside input trees. In particular, `--input .` conflicts with default `./outputs`; choose a separate `--output-dir` and, if supplied, `--output`.
+
+With no `-i/--input`, the run receives no input snapshot. With no `-o/--output`, the primary deliverable stays in its run bundle under `./outputs` by default.
 
 **Host scripts are not sandboxed.** They run with the host user's filesystem and network access. Runner-managed path checks and executable allowlists govern dispatch but cannot contain a script after launch. Run only trusted packages. Container isolation is deferred.
 
