@@ -20,7 +20,11 @@ from skillrunner.model.openai_compatible import OpenAICompatibleAdapter
 from skillrunner.model.protocol import ModelAdapter, ModelReply, ModelToolCall
 from skillrunner.qualification.budget import PaidAdapter, SpendingLedger
 from skillrunner.qualification.corpus import _verify
-from skillrunner.qualification.run import corpus_cases, qualification_rates
+from skillrunner.qualification.run import (
+    apply_request_context_cap,
+    corpus_cases,
+    qualification_rates,
+)
 from skillrunner.recording.bundle import atomic_write
 from skillrunner.runtime.signals import run_with_signals
 
@@ -319,7 +323,14 @@ async def evaluate_selection(args: argparse.Namespace) -> dict[str, Any]:
     )
     settings.diagnostics.log_content = args.log_content
     profile = select_model(settings)
+    if args.max_output < 1:
+        raise ValueError("Qualification output cap must be positive")
+    if profile.max_output_tokens is not None:
+        profile.max_output_tokens = min(profile.max_output_tokens, args.max_output)
     rates, cost_basis = qualification_rates(profile)
+    published_context, request_context_cap = apply_request_context_cap(
+        settings, profile, rates, getattr(args, "request_context_cap", 128000)
+    )
     result: dict[str, Any] = {
         "schema_version": 1,
         "started_at": datetime.now(UTC).isoformat(),
@@ -334,6 +345,8 @@ async def evaluate_selection(args: argparse.Namespace) -> dict[str, Any]:
         "model": profile.model,
         "endpoint": profile.base_url,
         "cost_basis": cost_basis,
+        "published_context_window_tokens": published_context,
+        "request_context_cap_tokens": request_context_cap,
         "package_count": package_count,
         "selected_case_ids": sorted(selected_ids),
         "runs": [],
@@ -406,6 +419,7 @@ def main() -> None:
     parser.add_argument("--max-tool-calls", type=int, default=8)
     parser.add_argument("--max-tokens", type=int, default=200000)
     parser.add_argument("--max-output", type=int, default=512)
+    parser.add_argument("--request-context-cap", type=int, default=128000)
     parser.add_argument("--log-content", action="store_true")
     result = asyncio.run(evaluate_selection(parser.parse_args()))
     if not result["summary"]["population_complete"]:

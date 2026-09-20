@@ -40,6 +40,25 @@ def qualification_rates(profile: Any) -> tuple[StandardRates, str]:
     )
 
 
+def apply_request_context_cap(
+    settings: Any, profile: Any, rates: StandardRates, requested_cap: int
+) -> tuple[int, int]:
+    """Limit paid qualification requests while retaining the published model limit."""
+    if type(requested_cap) is not int or requested_cap < 1:
+        raise ValueError("Qualification request context cap must be positive")
+    published = profile.context_window_tokens
+    if published is None:
+        raise ValueError("Qualification needs configured context capacity before paid requests")
+    effective = min(published, requested_cap) if rates.input or rates.output else published
+    if profile.max_output_tokens is not None and profile.max_output_tokens > effective:
+        raise ValueError("Qualification output cap exceeds the request context cap")
+    profile.context_window_tokens = effective
+    if settings.base_url is not None:
+        settings.direct_model.context_window_tokens = effective
+        settings.direct_model.max_output_tokens = profile.max_output_tokens
+    return published, effective
+
+
 def selection_matches(active: list[str], expected: list[str], status: str) -> bool:
     if not expected:
         return not active and status == "no_matching_skill"
@@ -207,6 +226,9 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     if profile.max_output_tokens is not None:
         profile.max_output_tokens = min(profile.max_output_tokens, args.max_output)
     rates, cost_basis = qualification_rates(profile)
+    published_context, request_context_cap = apply_request_context_cap(
+        settings, profile, rates, getattr(args, "request_context_cap", 128000)
+    )
     result: dict[str, Any] = {
         "schema_version": 1,
         "started_at": datetime.now(UTC).isoformat(),
@@ -218,6 +240,8 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         "semantic_grading": "pending_review",
         "release_qualified": False,
         "cost_basis": cost_basis,
+        "published_context_window_tokens": published_context,
+        "request_context_cap_tokens": request_context_cap,
         "corpus": corpus_evidence,
     }
     args.result.parent.mkdir(parents=True, exist_ok=True)
@@ -326,6 +350,7 @@ def main() -> None:
     parser.add_argument("--max-tool-calls", type=int, default=20)
     parser.add_argument("--max-tokens", type=int, default=200000)
     parser.add_argument("--max-output", type=int, default=2048)
+    parser.add_argument("--request-context-cap", type=int, default=128000)
     parser.add_argument("--timeout", default="3m", help="Per-run deadline (for example, 9m)")
     args = parser.parse_args()
     result = asyncio.run(evaluate(args))

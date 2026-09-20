@@ -167,6 +167,63 @@ async def test_missing_usage_or_failed_request_keeps_full_charge(tmp_path):
         )
 
 
+async def test_128k_paid_context_cap_limits_gpt55_unknown_request_reservation(tmp_path):
+    from types import SimpleNamespace
+
+    from skillrunner.model.protocol import ModelReply
+    from skillrunner.qualification.run import apply_request_context_cap
+
+    module = ledger_api()
+    profile = SimpleNamespace(
+        model="gpt-5.5", context_window_tokens=1_050_000, max_output_tokens=4096
+    )
+    settings = SimpleNamespace(base_url=None)
+    rates = module.StandardRates(Decimal("5"), Decimal("30"))
+    assert apply_request_context_cap(settings, profile, rates, 128000) == (1_050_000, 128000)
+    assert profile.context_window_tokens == 128000
+
+    class NoUsageAdapter:
+        async def complete(self, *args):
+            return ModelReply("answer", (), "stop", None, None)
+
+    path = tmp_path / "spending.json"
+    seed(path)
+    with module.SpendingLedger(path) as ledger:
+        await module.PaidAdapter(
+            NoUsageAdapter(), profile, ledger, rates, max_output=4096
+        ).complete([], [], 4096, 5)
+    record = json.loads(path.read_text())["requests"][-1]
+    assert Decimal(record["reserved_usd"]) == Decimal("0.92288")
+    assert record["status"] == "reserved_outcome_unknown"
+
+
+def test_paid_context_cap_rejects_unsafe_values_before_request():
+    from types import SimpleNamespace
+
+    from skillrunner.qualification.run import apply_request_context_cap
+
+    rates = ledger_api().StandardRates(Decimal("5"), Decimal("30"))
+    settings = SimpleNamespace(base_url=None)
+    profile = SimpleNamespace(context_window_tokens=1_050_000, max_output_tokens=4096)
+    for cap in (0, -1, True, 2048):
+        with pytest.raises(ValueError, match="cap"):
+            apply_request_context_cap(settings, profile, rates, cap)
+    assert profile.context_window_tokens == 1_050_000
+
+
+def test_paid_context_cap_updates_direct_endpoint_profile_without_losing_published_limit():
+    from types import SimpleNamespace
+
+    from skillrunner.qualification.run import apply_request_context_cap
+
+    rates = ledger_api().StandardRates(Decimal("5"), Decimal("30"))
+    settings = SimpleNamespace(base_url="http://localhost/v1", direct_model=SimpleNamespace())
+    profile = SimpleNamespace(context_window_tokens=1_050_000, max_output_tokens=4096)
+    assert apply_request_context_cap(settings, profile, rates, 128000) == (1_050_000, 128000)
+    assert settings.direct_model.context_window_tokens == 128000
+    assert settings.direct_model.max_output_tokens == 4096
+
+
 def test_overrun_halts_further_requests_but_records_actual_charge(tmp_path):
     path = tmp_path / "spending.json"
     seed(path)

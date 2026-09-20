@@ -105,11 +105,13 @@ max_output_tokens = 128000
     invocations = []
     observed_timeouts = []
     observed_output_caps = []
+    observed_context_caps = []
 
     async def task(request, settings, **kwargs):
         invocations.append(request)
         observed_timeouts.append(settings.limits.timeout)
         observed_output_caps.append(settings.models["luna"].max_output_tokens)
+        observed_context_caps.append(settings.models["luna"].context_window_tokens)
         manifest = tmp_path / f"manifest-{len(invocations)}.json"
         manifest.write_text(json.dumps({"provenance": {"activated_skills": [{"name": "writer"}]}}))
         output = tmp_path / f"answer-{len(invocations)}.md"
@@ -125,6 +127,9 @@ max_output_tokens = 128000
     assert len(invocations) == 3
     assert observed_timeouts == [540.0] * 3
     assert observed_output_caps == [2048] * 3
+    assert observed_context_caps == [128000] * 3
+    assert result["published_context_window_tokens"] == 1050000
+    assert result["request_context_cap_tokens"] == 128000
     assert invocations[0].required_skills == (["writer"] if corpus_track == "explicit" else [])
     if corpus_track:
         assert len(result["corpus"]["population"]) == 1
