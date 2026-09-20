@@ -757,12 +757,25 @@ class Coordinator:
             schemas.RegisterArtifactArgs,
             register,
         )
+        scratch_root = self.bundle.root / "work/scratch"
+        artifact_root = self.bundle.root / "artifacts"
+        command_schema = schemas.RunCommandArgs.model_json_schema()
+        command_schema["properties"]["cwd"]["description"] = (
+            f"Use the exact absolute output directory {artifact_root} or scratch directory "
+            f"{scratch_root}. Omitted cwd means the active skill package. Do not insert work/ "
+            "before artifacts."
+        )
+        command_schema["properties"]["argv"]["description"] = (
+            f"Use OS paths. Write command outputs under {artifact_root} or {scratch_root}; "
+            "file-tool paths such as artifacts/file.txt are not OS paths."
+        )
         self.tools.register(
             "run_command",
-            "Run an allowlisted executable. Set cwd to an absolute generated root for output "
-            "work; argv uses OS paths, not logical file-tool root names.",
+            "Run an allowlisted executable. Use the exact generated-root paths in cwd and argv "
+            "for output; omit env_refs to use the configured environment.",
             schemas.RunCommandArgs,
             command,
+            parameters_schema=command_schema,
         )
         self.tools.register(
             "finish_run",

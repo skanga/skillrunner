@@ -40,6 +40,7 @@ class Adapter:
         self.profile = profile
         self.calls = iter(calls)
         self.requests = []
+        self.tool_schemas = []
         self.closed = False
 
     async def discover_capabilities(self, deadline):
@@ -49,6 +50,7 @@ class Adapter:
 
     async def complete(self, messages, tool_schemas, output_limit, request_deadline):
         self.requests.append(messages)
+        self.tool_schemas.append(tool_schemas)
         calls = next(self.calls)
         if callable(calls):
             calls = calls(messages)
@@ -106,6 +108,21 @@ async def test_no_catalog_finishes_locally_with_durable_failure(tmp_path):
     assert receipt["exit_code"] == 3
     assert not adapters
     assert Path(receipt["manifest_path"]).is_file()
+
+
+async def test_command_schema_names_exact_generated_output_roots(tmp_path):
+    receipt, adapters = await run(tmp_path, [finish()])
+    assert receipt["status"] == "succeeded"
+    root = Path(receipt["manifest_path"]).parent
+    schema = next(
+        item["function"]["parameters"]
+        for item in adapters[0].tool_schemas[0]
+        if item["function"]["name"] == "run_command"
+    )
+    description = schema["properties"]["cwd"]["description"]
+    assert str(root / "work/scratch") in description
+    assert str(root / "artifacts") in description
+    assert str(root / "work/artifacts") not in description
 
 
 async def test_blank_text_completion_without_an_artifact_is_not_success(tmp_path):
