@@ -1,6 +1,7 @@
 import argparse
 import hashlib
 import json
+import sys
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -147,6 +148,63 @@ def test_no_match_selection_requires_an_actual_terminal_decision():
     assert run.selection_matches([], [], "failed") is False
     assert run.selection_matches([], [], "no_matching_skill") is True
     assert run.selection_matches(["writer"], ["writer"], "failed") is True
+
+
+async def test_missing_command_environment_fails_before_paid_qualification(tmp_path, monkeypatch):
+    reference = "SKILLRUN_TEST_MISSING_COMMAND_REFERENCE"
+    monkeypatch.delenv(reference, raising=False)
+    config = tmp_path / "config.toml"
+    executable = json.dumps(sys.executable)
+    config.write_text(
+        f'''default_model = "luna"
+[models.luna]
+model = "gpt-5.6-luna"
+base_url = "http://unused.invalid/v1"
+auth_mode = "none"
+context_window_tokens = 1050000
+max_output_tokens = 128000
+[policy]
+allowed_executables = [{executable}]
+allowed_env = ["{reference}"]
+[policy.command_env.{executable}]
+UV_OFFLINE = "{reference}"
+'''
+    )
+    cases = tmp_path / "cases.json"
+    cases.write_text(json.dumps({"cases": [{"id": "text", "prompt": "Write"}]}))
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(json.dumps({"budget_usd": "5", "charged_usd": "0", "requests": []}))
+    args = argparse.Namespace(
+        config=config,
+        cases=cases,
+        skills_dir=tmp_path / "skills",
+        output_dir=tmp_path / "outputs",
+        model="luna",
+        case=["text"],
+        repeats=1,
+        ledger=ledger,
+        result=tmp_path / "evidence.json",
+        max_steps=8,
+        max_tool_calls=20,
+        max_tokens=200000,
+        max_output=2048,
+        timeout="9m",
+    )
+
+    invocations = []
+
+    async def task(*positional, **kwargs):
+        invocations.append(True)
+        manifest = tmp_path / "manifest.json"
+        manifest.write_text(json.dumps({"provenance": {"activated_skills": []}}))
+        return {"status": "succeeded", "manifest_path": str(manifest), "primary_output": None}
+
+    monkeypatch.setattr(run, "run_with_signals", task)
+    with pytest.raises(ValueError, match=reference):
+        await run.evaluate(args)
+    assert not args.result.exists()
+    assert not invocations
+    assert json.loads(ledger.read_text())["charged_usd"] == "0"
 
 
 @pytest.mark.parametrize("manifest_content", [None, "invalid JSON", "{}"])

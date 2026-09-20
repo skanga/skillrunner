@@ -190,6 +190,17 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         {},
     )
     settings.diagnostics.log_content = bool(getattr(args, "log_content", False))
+    available = {name.upper() if os.name == "nt" else name for name in os.environ}
+    missing = sorted(
+        {
+            reference
+            for mapping in settings.policy.command_env.values()
+            for reference in mapping.values()
+            if (reference.upper() if os.name == "nt" else reference) not in available
+        }
+    )
+    if missing:
+        raise ValueError("Missing configured command environment references: " + ", ".join(missing))
     profile = select_model(settings)
     if args.max_output < 1:
         raise ValueError("Qualification output cap must be positive")
