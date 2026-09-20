@@ -13,7 +13,8 @@ context_window_tokens = 32768
 max_output_tokens = 4096
 output_token_parameter = "max_tokens"
 # When neither configuration nor endpoint metadata supplies modalities, the
-# runner defaults to text. Uncomment only after confirming endpoint support.
+# runner defaults to text. Version one has no direct read_media accounting path;
+# endpoint image/audio support alone does not enable media reads.
 # input_modalities = ["text"]
 # For authentication: auth_mode = "bearer" and api_key_env = "MODEL_API_KEY".
 # Store the credential in that environment variable, never in this file.
