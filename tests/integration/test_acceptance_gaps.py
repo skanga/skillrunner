@@ -145,6 +145,84 @@ async def test_required_skill_decision_returns_needs_input_without_publishing(tm
     assert manifest["outputs"]["publication"]["state"] != "committed"
 
 
+async def test_transient_model_retry_is_new_attempt_without_replaying_tools(tmp_path):
+    settings = fixture(tmp_path)
+    adapters = []
+
+    class FlakyAdapter(Adapter):
+        def __init__(self, profile):
+            super().__init__(
+                profile,
+                [
+                    [
+                        call(
+                            "activate_skill",
+                            {"name": "writer", "reason": "Write report"},
+                            "activate",
+                        )
+                    ],
+                    finish(),
+                ],
+            )
+            self.attempts = 0
+
+        async def complete(self, *args):
+            self.attempts += 1
+            if self.attempts == 1:
+                self.requests.append(args[0])
+                raise RunnerError(
+                    "model_transport_error",
+                    "Transient model connection failure.",
+                    details={"retryable": True, "outcome_certainty": "unknown"},
+                )
+            return await super().complete(*args)
+
+    def factory(profile, key):
+        adapter = FlakyAdapter(profile)
+        adapters.append(adapter)
+        return adapter
+
+    receipt = await run_task(
+        RunRequest(
+            prompt="Write a report",
+            invocation_directory=tmp_path,
+            required_skills=["writer"],
+        ),
+        settings,
+        environ={},
+        adapter_factory=factory,
+    )
+
+    assert receipt["status"] == "succeeded"
+    assert receipt["exit_code"] == 0
+    assert len(adapters) == 1
+    assert adapters[0].attempts == len(adapters[0].requests) == 3
+    assert "Completed answer." in Path(receipt["primary_output"]).read_text()
+    manifest = manifest_for(receipt)
+    assert manifest["usage"]["model_attempts"] == 3
+    assert set(manifest["usage"]["measurement_quality"]) == {"unknown", "reported"}
+    events = [
+        json.loads(line)
+        for line in Path(receipt["manifest_path"])
+        .with_name("events.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    assert [
+        event["payload"]["retry_number"]
+        for event in events
+        if event["event_type"] == "model_retry_scheduled"
+    ] == [1]
+    assert [
+        event["payload"]["measurement_quality"]
+        for event in events
+        if event["event_type"] == "model_request_failed"
+    ] == ["unknown"]
+    assert [
+        event["payload"]["call_id"] for event in events if event["event_type"] == "tool_started"
+    ] == ["activate", "one"]
+
+
 async def test_provider_context_rejection_preserves_full_history_and_partial_artifact(tmp_path):
     settings = fixture(tmp_path)
     publication = tmp_path / "must-not-be-published.json"
