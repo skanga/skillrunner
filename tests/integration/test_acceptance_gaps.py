@@ -89,6 +89,62 @@ async def test_missing_model_credential_blocks_with_persisted_guidance(tmp_path)
     assert manifest["lifecycle"]["exit_code"] == 4
 
 
+async def test_required_skill_decision_returns_needs_input_without_publishing(tmp_path):
+    settings = fixture(tmp_path)
+    skill = settings.skills_dir / "writer/SKILL.md"
+    skill.write_text(
+        "---\nname: writer\ndescription: Write a report for a chosen audience.\n---\n"
+        "Before writing, ask whether the report is for internal or external readers. "
+        "Do not choose an audience on the user's behalf.\n"
+    )
+    publication = tmp_path / "report.md"
+    question = "Should this report address internal or external readers?"
+    calls = [
+        [
+            call(
+                "activate_skill",
+                {"name": "writer", "reason": "Follow the audience rule"},
+                "activate",
+            )
+        ],
+        [
+            call(
+                "finish_run",
+                {
+                    "outcome": "needs_input",
+                    "report": question,
+                    "missing_requirements": [question],
+                },
+                "finish",
+            )
+        ],
+    ]
+    receipt = await run_task(
+        RunRequest(
+            prompt="Write a report without choosing its audience for me",
+            invocation_directory=tmp_path,
+            required_skills=["writer"],
+            output=publication,
+        ),
+        settings,
+        environ={},
+        adapter_factory=lambda profile, key: Adapter(profile, calls),
+    )
+
+    assert receipt["status"] == "needs_input"
+    assert receipt["exit_code"] == 5
+    assert receipt["primary_output"] is None
+    assert receipt["artifact_paths"] == []
+    assert not publication.exists()
+    assert receipt["errors"][0]["code"] == "missing_decision"
+    assert receipt["errors"][0]["suggested_action"] == question
+    assert question in Path(receipt["report_path"]).read_text()
+    manifest = manifest_for(receipt)
+    assert [skill["name"] for skill in manifest["provenance"]["activated_skills"]] == ["writer"]
+    assert manifest["lifecycle"]["status"] == "needs_input"
+    assert manifest["outputs"]["publication"]["state"] != "committed"
+
+
 async def test_provider_context_rejection_preserves_full_history_and_partial_artifact(tmp_path):
     settings = fixture(tmp_path)
     publication = tmp_path / "must-not-be-published.json"
