@@ -3,8 +3,10 @@
 import base64
 import io
 import json
+import struct
 import sys
 import zipfile
+import zlib
 from copy import deepcopy
 from pathlib import Path
 
@@ -370,6 +372,103 @@ async def test_valid_docx_fixture_is_container_validated_and_published(tmp_path)
     assert artifact["status"] == "validated"
     assert artifact["format"] == "docx"
     assert artifact["validation_level"] == "container"
+    assert manifest["outputs"]["publication"]["state"] == "committed"
+
+
+def minimal_png_bytes():
+    def chunk(kind, data):
+        return (
+            len(data).to_bytes(4, "big") + kind + data + zlib.crc32(kind + data).to_bytes(4, "big")
+        )
+
+    header = struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0)
+    pixel = zlib.compress(b"\x00\xff\x00\x00\xff")
+    return (
+        b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", pixel) + chunk(b"IEND", b"")
+    )
+
+
+async def test_valid_png_uses_configured_external_validator_before_publication(tmp_path):
+    fixture(tmp_path)
+    executable = str(Path(sys.executable).resolve())
+    validator_code = (
+        "import pathlib,struct,sys,zlib\n"
+        "blob=pathlib.Path(sys.argv[1]).read_bytes()\n"
+        "assert blob[:8] == b'\\x89PNG\\r\\n\\x1a\\n'\n"
+        "offset=8; chunks=[]\n"
+        "while offset < len(blob):\n"
+        "  size=int.from_bytes(blob[offset:offset+4], 'big'); offset+=4\n"
+        "  kind=blob[offset:offset+4]; offset+=4\n"
+        "  data=blob[offset:offset+size]; offset+=size\n"
+        "  crc=int.from_bytes(blob[offset:offset+4], 'big'); offset+=4\n"
+        "  assert len(kind)==4 and len(data)==size and crc==zlib.crc32(kind+data)\n"
+        "  chunks.append((kind,data))\n"
+        "assert offset==len(blob) and [kind for kind,_ in chunks]==[b'IHDR',b'IDAT',b'IEND']\n"
+        "assert struct.unpack('>IIBBBBB',chunks[0][1])==(1,1,8,6,0,0,0)\n"
+        "assert zlib.decompress(chunks[1][1])==b'\\x00\\xff\\x00\\x00\\xff'\n"
+        "assert chunks[2][1]==b''\n"
+    )
+    config = tmp_path / "skillrun.toml"
+    config.write_text(
+        config.read_text()
+        + "\n[policy]\nallowed_executables = ["
+        + json.dumps(executable)
+        + "]\n[artifacts.validators.png]\ncommand = "
+        + json.dumps(executable)
+        + "\nargs = "
+        + json.dumps(["-c", validator_code, "{path}"])
+        + "\n"
+    )
+    settings = resolve_settings(tmp_path, {}, {})
+    image = minimal_png_bytes()
+    write_png = (
+        "import base64,pathlib; "
+        f"pathlib.Path('result.png').write_bytes(base64.b64decode({base64.b64encode(image).decode()!r}))"
+    )
+    publication = tmp_path / "published.png"
+    calls = [
+        [
+            call(
+                "run_command",
+                {"executable": executable, "argv": ["-c", write_png], "cwd": "scratch"},
+                "write",
+            )
+        ],
+        [
+            call(
+                "register_artifact",
+                {
+                    "path": "scratch/result.png",
+                    "format": "png",
+                    "role": "primary",
+                    "description": "Validated PNG fixture",
+                },
+                "register",
+            )
+        ],
+        registered_primary,
+    ]
+    receipt = await run_task(
+        RunRequest(
+            prompt="Create a PNG",
+            invocation_directory=tmp_path,
+            required_skills=["writer"],
+            format="png",
+            output=publication,
+        ),
+        settings,
+        environ={},
+        adapter_factory=lambda profile, key: Adapter(profile, calls),
+    )
+
+    assert receipt["status"] == "succeeded", receipt
+    assert publication.read_bytes() == image
+    manifest = manifest_for(receipt)
+    artifact = manifest["outputs"]["artifacts"][0]
+    assert artifact["status"] == "validated"
+    assert artifact["format"] == "png"
+    assert artifact["validation_level"] == "external"
+    assert artifact["validator"]["command"] == executable
     assert manifest["outputs"]["publication"]["state"] == "committed"
 
 
