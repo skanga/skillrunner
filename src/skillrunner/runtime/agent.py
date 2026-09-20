@@ -143,14 +143,17 @@ class AgentLoop:
                         and retries_used < self.model_transport_retries
                     ):
                         retries_used += 1
+                        retry_delay = min(2.0 ** min(retries_used, 3), self.deadline.remaining / 2)
                         self.on_event(
                             "model_retry_scheduled",
                             {
                                 "failed_attempt": reservation.attempt,
                                 "retry_number": retries_used,
                                 "reason": failure.code,
+                                "delay_seconds": retry_delay,
                             },
                         )
+                        await asyncio.sleep(retry_delay)
                         continue
                 else:
                     self.ledger.release_unstarted_model(reservation)

@@ -115,7 +115,7 @@ async def test_failed_request_charges_unknown_reservation_once():
     assert ledger.model_attempts == 1
 
 
-async def test_retryable_transport_failure_gets_one_new_attempt_without_tools():
+async def test_retryable_transport_failure_gets_one_new_attempt_without_tools(monkeypatch):
     failure = RunnerError(
         "model_transport_error",
         "Unavailable.",
@@ -123,6 +123,14 @@ async def test_retryable_transport_failure_gets_one_new_attempt_without_tools():
     )
     loop, adapter, _, ledger = setup([failure, reply()])
     events = []
+    delays = []
+    original_sleep = asyncio.sleep
+
+    async def record_sleep(delay):
+        delays.append(delay)
+        await original_sleep(0)
+
+    monkeypatch.setattr(api().asyncio, "sleep", record_sleep)
     loop.on_event = lambda name, payload: events.append((name, payload))
 
     assert await loop.run() == {"report": "done"}
@@ -136,6 +144,7 @@ async def test_retryable_transport_failure_gets_one_new_attempt_without_tools():
         "tool_completed",
     ]
     assert events[2][1]["retry_number"] == 1
+    assert any(delay >= 1.0 for delay in delays)
 
 
 async def test_retry_allowance_resets_after_successful_model_turn():
