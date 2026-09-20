@@ -116,6 +116,30 @@ def test_frozen_selection_population_detects_label_or_prompt_drift(tmp_path):
         raise AssertionError("Changed prompt must invalidate frozen selection labels")
 
 
+def test_refrozen_selection_set_keeps_full_population_requirement():
+    validate = api().validate_selection_set
+    cases = [{"id": str(index)} for index in range(22)]
+    selection = {
+        "set_id": "full-catalog-automatic-selection-v2",
+        "total_cases": 22,
+        "positive_cases": 21,
+        "no_match_cases": 1,
+    }
+    validate(selection, cases)
+
+    for invalid in (
+        {**selection, "set_id": "unrelated-v2"},
+        {**selection, "total_cases": 21},
+        {**selection, "no_match_cases": 0},
+    ):
+        try:
+            validate(invalid, cases)
+        except ValueError as error:
+            assert "incomplete" in str(error)
+        else:
+            raise AssertionError("Invalid frozen selection metadata must be rejected")
+
+
 async def test_selection_case_records_activated_skill_before_task_action(tmp_path):
     from tests.integration.test_coordinator import Adapter as CoordinatorAdapter
     from tests.integration.test_coordinator import call, fixture

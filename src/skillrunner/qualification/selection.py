@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -284,6 +285,21 @@ def verify_selection_catalog(skills_dir: Path, corpus_path: Path, preparation_pa
     return len(catalog.skills)
 
 
+def validate_selection_set(selection: dict[str, Any], cases: list[dict[str, Any]]) -> None:
+    """Accept refrozen revisions while retaining the complete labeled population."""
+    if (
+        re.fullmatch(
+            r"full-catalog-automatic-selection-v[1-9][0-9]*",
+            str(selection.get("set_id", "")),
+        )
+        is None
+        or len(cases) != selection.get("total_cases")
+        or selection.get("positive_cases") != 21
+        or selection.get("no_match_cases") != 1
+    ):
+        raise ValueError("The frozen 22-case selection population is incomplete")
+
+
 async def evaluate_selection(args: argparse.Namespace) -> dict[str, Any]:
     """Run one selection observation per frozen label under the shared ledger."""
     cases = load_selection_cases(
@@ -294,13 +310,7 @@ async def evaluate_selection(args: argparse.Namespace) -> dict[str, Any]:
         args.preflight,
     )
     selection = json.loads(args.selection_set.read_text())
-    if (
-        selection.get("set_id") != "full-catalog-automatic-selection-v1"
-        or len(cases) != selection.get("total_cases")
-        or selection.get("positive_cases") != 21
-        or selection.get("no_match_cases") != 1
-    ):
-        raise ValueError("The frozen 22-case selection population is incomplete")
+    validate_selection_set(selection, cases)
     selected_ids = set(args.case or [case["id"] for case in cases])
     if not selected_ids or selected_ids - {case["id"] for case in cases}:
         raise ValueError("Select only known frozen selection case IDs")
