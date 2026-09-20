@@ -37,6 +37,7 @@ from skillrunner.runtime.budgets import Deadline, UsageLedger
 from skillrunner.runtime.cleanup import remove_work_tree
 from skillrunner.runtime.context import RunContext
 from skillrunner.runtime.environment import build_child_environment
+from skillrunner.runtime.media import read_png
 from skillrunner.runtime.processes import ProcessSupervisor
 from skillrunner.runtime.storage import check_tree_bytes, monitor_operation
 from skillrunner.tools import schemas
@@ -468,6 +469,8 @@ class Coordinator:
             "capacity_sources": capacities.sources,
             "credential_reference": self.profile.api_key_env,
             "auth_mode": self.profile.auth_mode,
+            "input_modalities": self.profile.input_modalities,
+            "image_accounting": self.profile.image_accounting,
         }
         if settings.mcp:
             await self._connect_mcp()
@@ -640,8 +643,10 @@ class Coordinator:
             (
                 "read_media",
                 schemas.ReadMediaArgs,
-                "Request a media representation from an approved path. Returns an explicit "
-                "unsupported-capability error when no compatible media adapter is available.",
+                "Read a validated PNG from an approved path with representation=image. Requires "
+                "configured image capability, image accounting and an allowlisted PNG validator. "
+                "The image is provided after all tool results in this batch. Other formats "
+                "or missing capabilities return unsupported_capability.",
             ),
             (
                 "write_file",
@@ -663,6 +668,25 @@ class Coordinator:
                 async def invoke(args: BaseModel) -> Any:
                     if tool_name in {"write_file", "edit_file"}:
                         self._require_active()
+                    if tool_name == "read_media":
+                        validator = self.settings.artifacts.validators.get("png")
+                        environment = build_child_environment(
+                            self.environ,
+                            references=self.settings.policy.command_env.get(validator.command, {})
+                            if validator
+                            else {},
+                        )
+                        return await read_png(
+                            self.files,
+                            **args.model_dump(),
+                            profile=self.profile,
+                            validator=validator,
+                            supervisor=self.supervisor,
+                            environment=environment,
+                            deadline=self.deadline,
+                            staging=self.bundle.root / "work/staging",
+                            monitor=self.monitor_storage,
+                        )
                     return getattr(self.files, tool_name)(**args.model_dump(exclude_none=True))
 
                 return invoke

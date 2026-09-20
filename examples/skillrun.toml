@@ -13,9 +13,12 @@ context_window_tokens = 32768
 max_output_tokens = 4096
 output_token_parameter = "max_tokens"
 # When neither configuration nor endpoint metadata supplies modalities, the
-# runner defaults to text. Version one has no direct read_media accounting path;
-# endpoint image/audio support alone does not enable media reads.
+# runner defaults to text. PNG reads require the explicit accounting contract
+# and validator below; endpoint modality support alone does not enable reads.
 # input_modalities = ["text"]
+# PNG inspection also requires an allowlisted artifacts.validators.png parser:
+# input_modalities = ["text", "image"]
+# image_accounting = "openai-patch-high-v1"
 # For authentication: auth_mode = "bearer" and api_key_env = "MODEL_API_KEY".
 # Store the credential in that environment variable, never in this file.
 # Optional endpoint-specific inference options; use only supported keys.
@@ -37,6 +40,9 @@ max_output_tokens = 4096
 # api_key_env = "DIRECT_MODEL_API_KEY"
 # output_token_parameter = "max_completion_tokens"
 # input_modalities = ["text"]
+# PNG inspection also requires an allowlisted artifacts.validators.png parser:
+# input_modalities = ["text", "image"]
+# image_accounting = "openai-patch-high-v1"
 # [direct_model.request_options]
 # temperature = 0.2
 # [direct_model.discovery]
@@ -105,3 +111,9 @@ redact_env = []
 # allowed_tools = ["lookup"]
 # [mcp.local.env]
 # SERVICE_TOKEN = "MY_SERVICE_TOKEN"
+
+# PNG image reads use the same configured parser as PNG artifact validation.
+# Enable the image modality and explicit accounting contract in the model profile.
+# [artifacts.validators.png]
+# command = "/absolute/path/to/png-validator"
+# args = ["{path}"]

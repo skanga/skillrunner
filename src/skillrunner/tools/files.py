@@ -407,6 +407,18 @@ class FileTools:
             raise _error("file_access_denied", "Workspace changed during search.") from None
         return self._bounded(result)
 
+    def read_binary_snapshot(self, path: str) -> tuple[str, bytes]:
+        """Bounded stable bytes for the coordinator's validated media handler."""
+        _, actual, logical = self._resolve(path)
+        with self._open(actual) as stream:
+            if os.fstat(stream.fileno()).st_size > self.max_tool_output_bytes:
+                raise _error("budget_exhausted", "Image exceeds tool output byte limit.")
+            data = stream.read(self.max_tool_output_bytes + 1)
+            if len(data) > self.max_tool_output_bytes:
+                raise _error("budget_exhausted", "Image exceeds tool output byte limit.")
+            self.check()
+        return logical, data
+
     def read_media(self, path: str, *, representation: str) -> dict[str, Any]:
         self._resolve(path)
         raise _error(
