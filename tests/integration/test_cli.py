@@ -4,6 +4,8 @@ import json
 import os
 import subprocess
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import httpx
@@ -45,6 +47,106 @@ def test_installed_cli_json_mode_emits_one_receipt_without_tool_chatter(tmp_path
     assert Path(receipt["report_path"]).is_file()
     assert Path(receipt["manifest_path"]).is_file()
     assert "no_matching_skill" in completed.stderr
+
+
+def test_installed_cli_json_mode_success_has_no_model_or_tool_chatter(tmp_path):
+    requests = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(404)
+            self.end_headers()
+
+        def do_POST(self):
+            request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            requests.append(request)
+            response = {
+                "id": "chatcmpl-stub",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "stub",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call_finish",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "finish_run",
+                                        "arguments": json.dumps(
+                                            {"outcome": "succeeded", "report": "Hello from stub."}
+                                        ),
+                                    },
+                                }
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120},
+            }
+            content = json.dumps(response).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
+
+        def log_message(self, *args):
+            pass
+
+    package = tmp_path / "skills" / "writer"
+    package.mkdir(parents=True)
+    (package / "SKILL.md").write_text(
+        "---\nname: writer\ndescription: Write a greeting.\n---\nWrite a greeting.\n"
+    )
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        (tmp_path / "skillrun.toml").write_text(
+            f"""default_model = "stub"
+[models.stub]
+base_url = "http://127.0.0.1:{server.server_port}/v1"
+model = "stub"
+auth_mode = "none"
+context_window_tokens = 50000
+max_output_tokens = 2048
+"""
+        )
+        command = Path(sys.executable).parent / ("skillrun.exe" if os.name == "nt" else "skillrun")
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith(("SKILLRUN_", "OPENAI_"))
+        }
+        completed = subprocess.run(
+            [str(command), "run", "Write a greeting", "--skill", "writer", "--json"],
+            cwd=tmp_path,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert completed.returncode == 0
+    assert len(requests) == 1
+    assert len(completed.stdout.splitlines()) == 1
+    receipt = json.loads(completed.stdout)
+    assert receipt["status"] == "succeeded"
+    assert receipt["exit_code"] == 0
+    assert "Hello from stub." in Path(receipt["primary_output"]).read_text()
+    assert Path(receipt["manifest_path"]).is_file()
+    assert completed.stderr == ""
 
 
 @pytest.mark.parametrize("quiet", [False, True])
