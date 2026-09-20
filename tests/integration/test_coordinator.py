@@ -1517,3 +1517,115 @@ async def test_model_receives_absolute_workspace_and_safe_file_contract(tmp_path
     assert "scratch/answer.md" in instructions
     manifest = json.loads(Path(receipt["manifest_path"]).read_text())
     assert len(manifest["controls"]["policy_digest"]) == 64
+
+
+@pytest.mark.parametrize(
+    "mode", ["enabled", "off", "missing_validator", "mutating_validator", "invalid", "oversize"]
+)
+async def test_png_media_uses_validated_copy_and_metadata_only_logs(tmp_path, mode):
+    import base64
+    import struct
+    import sys
+    import zlib
+
+    def chunk(kind, data):
+        return (
+            struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+        )
+
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(b"\x00\xff\x00\x00"))
+        + chunk(b"IEND", b"")
+    )
+    source = tmp_path / "page.png"
+    source.write_bytes(png if mode != "invalid" else b"invalid PNG")
+    original = source.read_bytes()
+    fixture(tmp_path)
+    config = tmp_path / "skillrun.toml"
+    text = config.read_text().replace(
+        "[limits]",
+        (
+            'image_accounting = "openai-patch-high-v1"\ninput_modalities = ["text", "image"]\n'
+            if mode != "off"
+            else ""
+        )
+        + "[limits]",
+    )
+    validator = tmp_path / "validate.py"
+    validator.write_text(
+        "import pathlib,sys,zlib,struct\n"
+        "p=pathlib.Path(sys.argv[1]); b=p.read_bytes()\n"
+        "assert b[:8]==b'\\x89PNG\\r\\n\\x1a\\n'\n"
+        "pos=8; pixels=b''\n"
+        "while pos<len(b):\n"
+        " n=struct.unpack('>I',b[pos:pos+4])[0];k=b[pos+4:pos+8];v=b[pos+8:pos+8+n]\n"
+        " crc=struct.unpack('>I',b[pos+8+n:pos+12+n])[0];assert crc==zlib.crc32(k+v)\n"
+        " if k==b'IDAT': pixels+=v\n"
+        " pos+=12+n\n"
+        "assert zlib.decompress(pixels)==b'\\x00\\xff\\x00\\x00'\n"
+        + ("p.write_bytes(b'changed')\n" if mode == "mutating_validator" else "")
+    )
+    text += (
+        "\n[policy]\nallowed_executables = ["
+        + json.dumps(sys.executable)
+        + "]\n[diagnostics]\nlog_content = true\n"
+    )
+    if mode != "missing_validator":
+        text += (
+            "\n[artifacts.validators.png]\ncommand = "
+            + json.dumps(sys.executable)
+            + "\nargs = ["
+            + json.dumps(str(validator))
+            + ', "{path}"]\n'
+        )
+    if mode == "oversize":
+        text += "\n[storage]\nmax_tool_output_bytes = 400\n"
+    config.write_text(text)
+    settings = resolve_settings(tmp_path, {}, {})
+    adapters = []
+
+    def factory(profile, key):
+        adapter = Adapter(
+            profile,
+            [
+                [call("read_media", {"path": "input-1/page.png", "representation": "image"})],
+                finish(),
+            ],
+        )
+        adapters.append(adapter)
+        return adapter
+
+    receipt = await api().run_task(
+        RunRequest(
+            prompt="Read image",
+            invocation_directory=tmp_path,
+            required_skills=["writer"],
+            inputs=[source],
+        ),
+        settings,
+        environ={},
+        adapter_factory=factory,
+    )
+    assert source.read_bytes() == original
+    messages = adapters[0].requests
+    if mode == "enabled":
+        assert (
+            messages[1][-1]["content"][1]["image_url"]["url"]
+            == "data:image/png;base64," + base64.b64encode(png).decode()
+        )
+        assert receipt["exit_code"] == 0
+    elif mode == "oversize":
+        assert receipt["exit_code"] != 0
+        assert len(messages) == 1
+    else:
+        result = json.loads(messages[1][-1]["content"])
+        assert not result["ok"]
+        assert result["error"]["code"] in ("unsupported_capability", "artifact_invalid")
+    root = Path(receipt["manifest_path"]).parent
+    logs = "".join(
+        f.read_text() for f in (root / "events.jsonl", root / "run.json", root / "result.md")
+    )
+    assert base64.b64encode(png).decode() not in logs
+    assert not list(root.glob("work/staging/media-*"))

@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from skillrunner.domain.errors import RunnerError
+from skillrunner.model.media import MediaAttachment
 from skillrunner.model.protocol import ModelToolCall
 from skillrunner.runtime.budgets import estimate_text_tokens
 
@@ -28,7 +29,7 @@ class RunContext:
         self._catalog = copy.deepcopy(catalog)
         self._inputs = copy.deepcopy(input_inventory or [])
         self._active: dict[str, dict[str, str]] = {}
-        self._history: list[dict[str, Any]] = []
+        self._history: list[dict[str, Any] | tuple[MediaAttachment, ...]] = []
 
     def activate(self, name: str, instructions: str, package_root: str) -> None:
         """Caller performs snapshot/capacity admission before committing activation."""
@@ -63,7 +64,20 @@ class RunContext:
     def append_correction(self, text: str) -> None:
         self._history.append({"role": "user", "content": text})
 
-    def messages(self) -> list[dict[str, Any]]:
+    def append_media(self, attachments: Sequence[MediaAttachment]) -> None:
+        if attachments:
+            self._history.append(tuple(attachments))
+
+    @property
+    def image_token_estimate(self) -> int:
+        return sum(
+            image.tokens for item in self._history if isinstance(item, tuple) for image in item
+        )
+
+    def diagnostic_messages(self) -> list[dict[str, Any]]:
+        return self.messages(diagnostic=True)
+
+    def messages(self, *, diagnostic: bool = False) -> list[dict[str, Any]]:
         return [
             {"role": "system", "content": self._runner_instructions},
             {"role": "user", "content": self._prompt},
@@ -78,8 +92,21 @@ class RunContext:
                     }
                 ),
             },
-            *copy.deepcopy(self._history),
+            *[
+                {
+                    "role": "user",
+                    "content": [
+                        part for image in item for part in image.content(diagnostic=diagnostic)
+                    ],
+                }
+                if isinstance(item, tuple)
+                else copy.deepcopy(item)
+                for item in self._history
+            ],
         ]
 
     def estimate(self, tool_schemas: list[dict[str, Any]]) -> int:
-        return estimate_text_tokens(self.messages(), tool_schemas)
+        return (
+            estimate_text_tokens(self.diagnostic_messages(), tool_schemas)
+            + self.image_token_estimate
+        )

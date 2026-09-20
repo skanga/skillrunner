@@ -96,8 +96,14 @@ class AgentLoop:
                         "attempt": reservation.attempt,
                         "input_estimate": estimate,
                         "output_limit": reservation.output_limit,
-                        "estimate_basis": "utf8_bytes",
-                        "_content": {"messages": self.context.messages(), "tools": schemas},
+                        "estimate_basis": "utf8_bytes+image_contract"
+                        if self.context.image_token_estimate
+                        else "utf8_bytes",
+                        "image_token_estimate": self.context.image_token_estimate,
+                        "_content": {
+                            "messages": self.context.diagnostic_messages(),
+                            "tools": schemas,
+                        },
                     },
                 )
                 messages = self.context.messages()
@@ -210,6 +216,13 @@ class AgentLoop:
                 self.ledger,
                 self.deadline,
                 on_result=self._record_result,
+            )
+            self.context.append_media(
+                [
+                    result.attachment
+                    for result in results
+                    if result.ok and getattr(result, "attachment", None) is not None
+                ]
             )
             for result in results:
                 if result.name == "finish_run" and result.ok:
