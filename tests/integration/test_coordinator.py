@@ -102,6 +102,47 @@ async def run(
     return receipt, adapters
 
 
+async def test_external_page_id_in_finish_proposal_can_be_corrected(tmp_path):
+    def corrected_finish(messages):
+        prior = json.loads(messages[-1]["content"])
+        assert prior["name"] == "finish_run"
+        assert prior["ok"] is False
+        assert prior["error"]["code"] == "artifact_invalid"
+        return [
+            call(
+                "finish_run",
+                {
+                    "outcome": "succeeded",
+                    "report": "Created page fixture-page-0001. Both pilots were reviewed.",
+                },
+                "3",
+            )
+        ]
+
+    receipt, adapters = await run(
+        tmp_path,
+        [
+            [call("activate_skill", {"name": "writer", "reason": "Write summary"}, "1")],
+            [
+                call(
+                    "finish_run",
+                    {
+                        "outcome": "succeeded",
+                        "report": "Created page fixture-page-0001. Both pilots were reviewed.",
+                        "primary_artifact_id": "fixture-page-0001",
+                    },
+                    "2",
+                )
+            ],
+            corrected_finish,
+        ],
+    )
+    assert receipt["status"] == "succeeded"
+    assert receipt["primary_output"] is not None
+    assert "fixture-page-0001" in Path(receipt["primary_output"]).read_text()
+    assert len(adapters[0].requests) == 3
+
+
 async def test_no_catalog_finishes_locally_with_durable_failure(tmp_path):
     receipt, adapters = await run(tmp_path, [], skills=(), skill_exists=False)
     assert receipt["status"] == "no_matching_skill"
@@ -805,6 +846,38 @@ async def test_exhausted_turn_budget_preserves_completed_artifact_work(tmp_path)
     receipt, _ = await run(tmp_path, artifact_calls(), overrides={"max_steps": 2})
     assert receipt["status"] == "limit_exceeded"
     assert Path(receipt["artifact_paths"][0]).read_text() == "generated output"
+
+
+async def test_artifact_storage_exhaustion_preserves_existing_publication_and_report(tmp_path):
+    fixture(tmp_path)
+    config = tmp_path / "skillrun.toml"
+    config.write_text(config.read_text() + "\n[storage]\nmax_artifact_bytes = 1\n")
+    settings = resolve_settings(tmp_path, {}, {})
+    output = tmp_path / "published.txt"
+    output.write_text("previous output")
+
+    receipt = await api().run_task(
+        RunRequest(
+            prompt="Write a report",
+            invocation_directory=tmp_path,
+            required_skills=["writer"],
+            output=output,
+            overwrite=True,
+        ),
+        settings,
+        environ={},
+        adapter_factory=lambda profile, key: Adapter(profile, [*artifact_calls(), finish()]),
+    )
+
+    assert receipt["status"] == "limit_exceeded"
+    assert receipt["exit_code"] != 0
+    assert receipt["errors"][0]["code"] == "budget_exhausted"
+    assert output.read_text() == "previous output"
+    assert Path(receipt["report_path"]).is_file()
+    manifest = json.loads(Path(receipt["manifest_path"]).read_text())
+    assert manifest["lifecycle"]["status"] == "limit_exceeded"
+    assert manifest["lifecycle"]["cleanup"]["work_retained"] is True
+    assert (Path(receipt["manifest_path"]).parent / "work").is_dir()
 
 
 async def test_input_snapshots_have_distinct_logical_roots(tmp_path):
