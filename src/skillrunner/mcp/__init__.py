@@ -284,6 +284,23 @@ class _Connection:
                         if self.interaction:
                             raise self.interaction
                         value = result.model_dump(mode="json", by_alias=True, exclude_none=True)
+                        content = value.get("content")
+                        structured = value.get("structuredContent")
+                        if (
+                            isinstance(content, list)
+                            and len(content) == 1
+                            and isinstance(content[0], dict)
+                            and content[0].get("type") == "text"
+                            and isinstance(content[0].get("text"), str)
+                            and isinstance(structured, dict)
+                        ):
+                            try:
+                                if json.loads(content[0]["text"]) == structured:
+                                    # MCP servers may echo one JSON document in both fields.
+                                    # Keep the text fallback and omit only the duplicate copy.
+                                    value.pop("structuredContent")
+                            except (json.JSONDecodeError, RecursionError):
+                                pass
                         manager.bounded(value)
                         future.set_result(value)
                     except BaseException as exc:

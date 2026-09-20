@@ -1,0 +1,39 @@
+name: Windows no-POSIX-shell qualification
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    if: github.repository == 'skanga/skillrunner' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, Windows, X64, skillrunner-no-posix]
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - name: Check native host tools and shell absence on PATH
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python --version
+          node --version
+          uv --version
+          foreach ($name in @('sh', 'bash', 'zsh', 'dash', 'busybox')) {
+            $matches = @(Get-Command $name -All -ErrorAction SilentlyContinue)
+            if ($matches.Count -ne 0) {
+              throw "POSIX shell command is discoverable: $name"
+            }
+          }
+          Write-Output 'No POSIX shell command is discoverable on the runner PATH.'
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install locked test dependencies
+        run: uv sync --locked --dev
+      - name: Run native no-shell runtime contracts
+        run: uv run --locked pytest -q tests/integration/test_windows_runtime_acceptance.py
+      - name: Smoke test installed command
+        run: uv run --locked skillrun run --help

@@ -100,8 +100,15 @@ class RegisterArtifactArgs(ToolArgs):
 class FinishRunArgs(ToolArgs):
     outcome: Literal["succeeded", "no_matching_skill", "needs_input", "blocked", "failed"]
     report: str
-    primary_artifact_id: str | None = None
-    secondary_ids: list[str] = Field(default_factory=list)
+    primary_artifact_id: str | None = Field(
+        default=None,
+        description="ID returned by register_artifact, or null for a text-only report. "
+        "Never put an external page or record ID here; include it in report instead.",
+    )
+    secondary_ids: list[str] = Field(
+        default_factory=list,
+        description="Only IDs returned by register_artifact for secondary generated files.",
+    )
     missing_requirements: list[str] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
 

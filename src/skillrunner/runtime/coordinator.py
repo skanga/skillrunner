@@ -108,8 +108,11 @@ A plain Markdown answer may be returned directly in finish_run.report without wr
 In that case, report must contain the complete requested deliverable itself; a statement that the
 deliverable was created is not a substitute for its content.
 Host commands have ordinary OS access, not sandbox isolation. Do not disclose credentials or private
-reasoning. Register generated artifacts, then submit finish_run with the requested outcome, public
-report, primary artifact ID and secondary IDs. Record any low-impact assumptions in
+reasoning. Register generated artifacts, then submit finish_run with the requested outcome and
+public report. Set primary_artifact_id and secondary_ids only to IDs returned by register_artifact;
+external IDs such as a created page ID belong in the report. For a text-only answer in
+finish_run.report, leave primary_artifact_id null and secondary_ids empty. Record any low-impact
+assumptions in
 finish_run.assumptions; required decisions or approvals must not be assumed. A completion proposal
 must be the only tool call in its response. Report no_matching_skill if no installed skill applies,
 needs_input for a material
@@ -680,7 +683,23 @@ class Coordinator:
             return asdict(record)
 
         async def finish(args: BaseModel) -> Any:
-            return args.model_dump()
+            values = args.model_dump()
+            if values["outcome"] == "succeeded":
+                assert self.registry is not None
+                known = {record.id for record in self.registry.records}
+                primary_id = values["primary_artifact_id"]
+                if primary_id is not None and primary_id not in known:
+                    raise RunnerError(
+                        "artifact_invalid",
+                        "primary_artifact_id must be an ID returned by register_artifact; "
+                        "omit it for a text-only report. Put external page IDs in report.",
+                    )
+                if any(identifier not in known for identifier in values["secondary_ids"]):
+                    raise RunnerError(
+                        "artifact_invalid",
+                        "secondary_ids must contain only IDs returned by register_artifact.",
+                    )
+            return values
 
         async def command(args: BaseModel) -> Any:
             self._require_active()
