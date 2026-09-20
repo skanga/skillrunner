@@ -89,6 +89,23 @@ def test_embedded_url_credentials_and_query_are_redacted(tmp_path, scheme):
     assert "example.com/path" in encoded
 
 
+def test_redactor_preserves_bearer_token_prose_and_scrubs_authorization_headers():
+    from skillrunner.recording.redaction import Redactor
+
+    redactor = Redactor(["sk-testing"])
+    assert redactor.text("The bearer token populates HttpContext.User.") == (
+        "The bearer token populates HttpContext.User."
+    )
+    assert redactor.text("Authorization: Bearer abc123") == ("Authorization: Bearer [REDACTED]")
+    assert redactor.text("Proxy-Authorization: Basic dXNlcjpwYXNz") == (
+        "Proxy-Authorization: Basic [REDACTED]"
+    )
+    assert redactor.text("model key sk-testing") == "model key [REDACTED]"
+    assert redactor.clean({"authorization": "Bearer another-secret"}) == {
+        "authorization": "[REDACTED]"
+    }
+
+
 def test_event_records_operation_identifiers(tmp_path):
     recorder = api().EventLog(tmp_path / "events.jsonl", run_id="run1", max_bytes=10000)
     recorder.emit("tool_started", {}, skill_id="sample", tool_name="read_text", call_id="call1")

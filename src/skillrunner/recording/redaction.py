@@ -50,7 +50,11 @@ class Redactor:
                 return "[REDACTED_URL]"
 
         value = re.sub(r"https?://[^\s<>]+", url, value, flags=re.IGNORECASE)
-        return re.sub(r"(?i)\b(Bearer|Basic)\s+[^\s,;]+", r"\1 [REDACTED]", value)
+        return re.sub(
+            r"(?i)\b((?:Proxy-)?Authorization\s*:\s*(?:Bearer|Basic))\s+[^\s,;]+",
+            r"\1 [REDACTED]",
+            value,
+        )
 
     def clean(self, value: Any, *, _depth: int = 0) -> Any:
         if _depth > 32:
