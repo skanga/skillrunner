@@ -27,7 +27,7 @@ def main() -> None:
     assert len(wheels) == 1, "Build exactly one wheel before this probe"
     uv = shutil.which("uv")
     assert uv is not None
-    env = dict(os.environ, UV_OFFLINE="1", UV_PYTHON_DOWNLOADS="never")
+    env = dict(os.environ, UV_PYTHON_DOWNLOADS="never")
     with tempfile.TemporaryDirectory(prefix="skillrunner-install-probe-") as name:
         temporary = Path(name)
         constraints = temporary / "constraints.txt"
