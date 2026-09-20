@@ -461,6 +461,30 @@ async def test_output_directory_uses_filename_requested_in_prompt(tmp_path):
     assert (output / "report.md").read_text() == "generated output"
 
 
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "Write the final output to chosen.md",
+        "Write the final output to ../chosen.md",
+        "The output should be written to chosen.md",
+        "Save the final deliverable as `chosen.md`",
+    ],
+)
+async def test_output_directory_uses_requested_name_when_artifact_name_differs(tmp_path, prompt):
+    output = tmp_path / "published"
+    output.mkdir()
+    receipt, _ = await run(
+        tmp_path,
+        [*artifact_calls(), finish()],
+        output=output,
+        prompt=prompt,
+    )
+    assert receipt["status"] == "succeeded"
+    assert receipt["primary_output"] == str(output / "chosen.md")
+    assert (output / "chosen.md").read_text() == "generated output"
+    assert not (tmp_path / "chosen.md").exists()
+
+
 async def test_output_directory_generates_unique_name_for_unnamed_artifact(tmp_path):
     output = tmp_path / "published"
     output.mkdir()

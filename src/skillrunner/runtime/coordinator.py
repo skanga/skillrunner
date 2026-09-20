@@ -46,18 +46,28 @@ from skillrunner.tools.files import FileTools
 AdapterFactory = Callable[[ModelProfile, SecretStr | None], Any]
 
 
-def requested_artifact_filename(prompt: str, filename: str) -> bool:
-    """Honor an artifact name only when the task explicitly names it as an output."""
-    name = re.escape(filename)
-    return bool(
-        re.search(
-            rf"\b(?:to|as|named|called|at|be|write|save|create|produce|deliver|publish|output)"
-            rf"\s+(?:the\s+)?(?:file\s+)?(?:[\w.-]+[/\\])*[`\"']?{name}"
-            rf"(?=$|[\s,.;:!?`\"'])",
-            prompt,
-            flags=re.IGNORECASE,
-        )
+def requested_output_filename(prompt: str) -> str | None:
+    """Return the basename of a file explicitly named as the output destination."""
+    pattern = (
+        r"(?:\b(?:write|save|publish|output|deliver|create|produce)\b"
+        r"(?:\s+(?:the|a|an|final|primary|output|result|report|file|artifact|deliverable)){0,5}"
+        r"\s+(?:to|as|at|named|called)\s+"
+        r"|\b(?:output|deliverable|file)\s+(?:should|must|will|shall)\s+be\s+"
+        r"(?:written|saved|published)\s+(?:to|as|at|in)\s+)"
+        r"(?:`([^`]+)`|\"([^\"]+)\"|'([^']+)'|([^\s,;:!?)}\]]+))"
     )
+    for match in re.finditer(pattern, prompt, flags=re.IGNORECASE):
+        raw = next(value for value in match.groups() if value is not None).strip()
+        if match.group(4) is not None:
+            raw = raw.rstrip(".")
+        name = re.split(r"[/\\]", raw)[-1]
+        if (
+            name not in {"", ".", ".."}
+            and not re.search(r'[<>:"|?*\x00]', name)
+            and (Path(name).suffix or raw != name or match.group(4) is None)
+        ):
+            return name
+    return None
 
 
 INSTRUCTIONS = """Execute the user's task using installed skills. Catalog and input metadata are
@@ -946,10 +956,8 @@ class Coordinator:
         if self.publication_directory is not None:
             if primary is None:
                 raise RunnerError("artifact_invalid", "No primary artifact to publish.")
-            filename = (
-                primary.path.name
-                if requested_artifact_filename(self.request.prompt, primary.path.name)
-                else f"output-{primary.id}.{self.request.format}"
+            filename = requested_output_filename(self.request.prompt) or (
+                f"output-{primary.id}.{self.request.format}"
             )
             target = self.publication_directory / filename
             try:
