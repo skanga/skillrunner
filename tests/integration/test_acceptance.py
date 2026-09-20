@@ -44,6 +44,78 @@ async def test_required_multiple_skills_record_order_and_complete_contents(tmp_p
     assert "Use precise prose." in context and "Check every factual claim." in context
 
 
+async def test_skill_reference_and_template_produce_output_without_changing_package(tmp_path):
+    settings = fixture(tmp_path)
+    package = settings.skills_dir / "writer"
+    reference = package / "references" / "style.md"
+    template = package / "assets" / "template.json"
+    reference.parent.mkdir()
+    template.parent.mkdir()
+    reference.write_text("Preferred greeting: Hello")
+    template.write_text('{"greeting":"","audience":"team"}')
+    original = {path: path.read_bytes() for path in (reference, template)}
+
+    def make_output(messages):
+        results = [json.loads(item["content"]) for item in messages if item["role"] == "tool"]
+        reads = {item["value"]["path"]: item["value"]["text"] for item in results}
+        assert reads["skill-writer/references/style.md"] == "Preferred greeting: Hello"
+        result = json.loads(reads["skill-writer/assets/template.json"])
+        result["greeting"] = reads["skill-writer/references/style.md"].split(": ", 1)[1]
+        return [
+            call(
+                "write_file",
+                {"path": "scratch/result.json", "content": json.dumps(result)},
+                "write",
+            )
+        ]
+
+    def complete(messages):
+        results = [json.loads(item["content"]) for item in messages if item["role"] == "tool"]
+        registered = next(item for item in results if item["name"] == "register_artifact")
+        return finish(primary_artifact_id=registered["value"]["id"])
+
+    receipt = await run_task(
+        RunRequest(
+            prompt="Use the writer reference and template to create a JSON greeting",
+            invocation_directory=tmp_path,
+            required_skills=["writer"],
+            format="json",
+        ),
+        settings,
+        environ={},
+        adapter_factory=lambda profile, key: Adapter(
+            profile,
+            [
+                [
+                    call("read_text", {"path": "skill-writer/references/style.md"}, "reference"),
+                    call("read_text", {"path": "skill-writer/assets/template.json"}, "template"),
+                ],
+                make_output,
+                [
+                    call(
+                        "register_artifact",
+                        {
+                            "path": "scratch/result.json",
+                            "format": "json",
+                            "role": "primary",
+                            "description": "Greeting from bundled resources",
+                        },
+                        "register",
+                    )
+                ],
+                complete,
+            ],
+        ),
+    )
+
+    assert receipt["status"] == "succeeded"
+    assert json.loads(Path(receipt["primary_output"]).read_text()) == {
+        "greeting": "Hello",
+        "audience": "team",
+    }
+    assert {path: path.read_bytes() for path in original} == original
+
+
 async def test_multiple_registered_outputs_are_all_preserved_and_linked(tmp_path):
     settings = fixture(tmp_path)
 
