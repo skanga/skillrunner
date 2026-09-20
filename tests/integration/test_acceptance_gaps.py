@@ -52,6 +52,41 @@ async def test_malformed_unrelated_package_is_recorded_while_valid_task_succeeds
     assert "Completed answer." in Path(receipt["primary_output"]).read_text()
 
 
+async def test_missing_model_credential_blocks_with_persisted_guidance(tmp_path):
+    settings = fixture(tmp_path)
+    settings.models["test"].auth_mode = "bearer"
+    settings.models["test"].api_key_env = "SKILLRUN_A11_MISSING_KEY"
+    adapters = []
+
+    def factory(profile, key):
+        adapters.append(Adapter(profile, [finish()]))
+        return adapters[-1]
+
+    receipt = await run_task(
+        RunRequest(
+            prompt="Write a report",
+            invocation_directory=tmp_path,
+            required_skills=["writer"],
+        ),
+        settings,
+        environ={},
+        adapter_factory=factory,
+    )
+
+    assert receipt["status"] == "blocked"
+    assert receipt["exit_code"] == 4
+    assert receipt["primary_output"] is None
+    assert adapters == []
+    error = receipt["errors"][0]
+    assert error["code"] == "missing_credential"
+    assert error["details"]["credential_reference"] == "SKILLRUN_A11_MISSING_KEY"
+    assert "SKILLRUN_A11_MISSING_KEY" in error["suggested_action"]
+    assert "SKILLRUN_A11_MISSING_KEY" in Path(receipt["report_path"]).read_text()
+    manifest = manifest_for(receipt)
+    assert manifest["lifecycle"]["status"] == "blocked"
+    assert manifest["lifecycle"]["exit_code"] == 4
+
+
 async def test_provider_context_rejection_preserves_full_history_and_partial_artifact(tmp_path):
     settings = fixture(tmp_path)
     publication = tmp_path / "must-not-be-published.json"
