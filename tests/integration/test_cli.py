@@ -1,6 +1,9 @@
 """CLI to real adapter contracts using only in-process HTTP transport."""
 
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import httpx
@@ -9,6 +12,39 @@ from typer.testing import CliRunner
 
 from skillrunner.cli.app import app
 from skillrunner.model.openai_compatible import OpenAICompatibleAdapter
+
+
+def test_installed_cli_json_mode_emits_one_receipt_without_tool_chatter(tmp_path):
+    command = Path(sys.executable).parent / ("skillrun.exe" if os.name == "nt" else "skillrun")
+    assert command.is_file()
+    environment = {
+        key: value for key, value in os.environ.items() if not key.startswith("SKILLRUN_")
+    }
+    completed = subprocess.run(
+        [
+            str(command),
+            "run",
+            "No installed skill applies",
+            "--json",
+            "--output-dir",
+            str(tmp_path / "outputs"),
+        ],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 3
+    assert len(completed.stdout.splitlines()) == 1
+    receipt = json.loads(completed.stdout)
+    assert receipt["status"] == "no_matching_skill"
+    assert receipt["exit_code"] == completed.returncode
+    assert Path(receipt["report_path"]).is_file()
+    assert Path(receipt["manifest_path"]).is_file()
+    assert "no_matching_skill" in completed.stderr
 
 
 @pytest.mark.parametrize("quiet", [False, True])
