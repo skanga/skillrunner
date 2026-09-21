@@ -95,7 +95,7 @@ class DirectModel(StrictModel):
     context_window_tokens: PositiveInt | None = None
     max_output_tokens: PositiveInt | None = None
     output_token_parameter: Literal["max_tokens", "max_completion_tokens"] = "max_tokens"
-    image_accounting: Literal["openai-patch-high-v1"] | None = None
+    image_accounting: Literal["openai-patch-high-v1", "gemma4-image-max-v1"] | None = None
     input_modalities: list[str] = Field(default_factory=lambda: ["text"])
     request_options: dict[str, Any] = Field(default_factory=dict)
     discovery: Discovery | None = None

@@ -1522,7 +1522,8 @@ async def test_model_receives_absolute_workspace_and_safe_file_contract(tmp_path
 @pytest.mark.parametrize(
     "mode", ["enabled", "off", "missing_validator", "mutating_validator", "invalid", "oversize"]
 )
-async def test_png_media_uses_validated_copy_and_metadata_only_logs(tmp_path, mode):
+@pytest.mark.parametrize("contract", ["openai-patch-high-v1", "gemma4-image-max-v1"])
+async def test_png_media_uses_validated_copy_and_metadata_only_logs(tmp_path, mode, contract):
     import base64
     import struct
     import sys
@@ -1547,7 +1548,7 @@ async def test_png_media_uses_validated_copy_and_metadata_only_logs(tmp_path, mo
     text = config.read_text().replace(
         "[limits]",
         (
-            'image_accounting = "openai-patch-high-v1"\ninput_modalities = ["text", "image"]\n'
+            f'image_accounting = "{contract}"\ninput_modalities = ["text", "image"]\n'
             if mode != "off"
             else ""
         )
@@ -1611,6 +1612,11 @@ async def test_png_media_uses_validated_copy_and_metadata_only_logs(tmp_path, mo
     assert source.read_bytes() == original
     messages = adapters[0].requests
     if mode == "enabled":
+        metadata = json.loads(messages[1][-1]["content"][0]["text"].split("(data): ", 1)[1])
+        assert metadata["image_accounting"] == contract
+        assert metadata["image_token_estimate"] == (
+            1122 if contract == "gemma4-image-max-v1" else 3
+        )
         assert (
             messages[1][-1]["content"][1]["image_url"]["url"]
             == "data:image/png;base64," + base64.b64encode(png).decode()

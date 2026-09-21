@@ -27,10 +27,10 @@ RATES = {
 
 
 def qualification_rates(profile: Any) -> tuple[StandardRates, str]:
-    if (
-        profile.base_url == "https://ehl.infra.adobe.net/v1"
-        and profile.model == "hosted_vllm/openai/gpt-oss-120b"
-    ):
+    if profile.base_url == "https://ehl.infra.adobe.net/v1" and profile.model in {
+        "hosted_vllm/openai/gpt-oss-120b",
+        "hosted_vllm/google/gemma-4-26B-A4B-it",
+    }:
         return StandardRates(Decimal("0"), Decimal("0")), "User confirmed this endpoint is unbilled"
     if profile.model not in RATES:
         raise ValueError("No user-authorized qualification pricing for this model and endpoint")

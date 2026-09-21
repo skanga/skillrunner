@@ -19,6 +19,8 @@ output_token_parameter = "max_tokens"
 # PNG inspection also requires an allowlisted artifacts.validators.png parser:
 # input_modalities = ["text", "image"]
 # image_accounting = "openai-patch-high-v1"
+# For a standard Gemma 4 single-image processor (maximum 1120 visual tokens):
+# image_accounting = "gemma4-image-max-v1"
 # For authentication: auth_mode = "bearer" and api_key_env = "MODEL_API_KEY".
 # Store the credential in that environment variable, never in this file.
 # Optional endpoint-specific inference options; use only supported keys.
@@ -43,6 +45,8 @@ max_output_tokens = 4096
 # PNG inspection also requires an allowlisted artifacts.validators.png parser:
 # input_modalities = ["text", "image"]
 # image_accounting = "openai-patch-high-v1"
+# For a standard Gemma 4 single-image processor (maximum 1120 visual tokens):
+# image_accounting = "gemma4-image-max-v1"
 # [direct_model.request_options]
 # temperature = 0.2
 # [direct_model.discovery]

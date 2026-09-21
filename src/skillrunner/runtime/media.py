@@ -8,7 +8,7 @@ from pathlib import Path
 from skillrunner.artifacts.external import ExternalValidationResult, validate_external
 from skillrunner.config.models import ExternalValidator, ModelProfile
 from skillrunner.domain.errors import RunnerError
-from skillrunner.model.media import IMAGE_ACCOUNTING, MediaAttachment, png_dimensions
+from skillrunner.model.media import IMAGE_ACCOUNTING_CONTRACTS, MediaAttachment, png_dimensions
 from skillrunner.runtime.budgets import Deadline
 from skillrunner.runtime.environment import ChildEnvironment
 from skillrunner.runtime.processes import ProcessSupervisor
@@ -33,12 +33,12 @@ async def read_png(
     if (
         representation != "image"
         or "image" not in profile.input_modalities
-        or profile.image_accounting != IMAGE_ACCOUNTING
+        or profile.image_accounting not in IMAGE_ACCOUNTING_CONTRACTS
         or validator is None
     ):
         raise RunnerError(
             "unsupported_capability",
-            "PNG reading requires image input, image_accounting=openai-patch-high-v1, "
+            "PNG reading requires image input, a supported explicit image_accounting contract, "
             "representation=image, and an allowlisted artifacts.validators.png parser.",
         )
     logical, data = files.read_binary_snapshot(path)
@@ -65,4 +65,11 @@ async def read_png(
         checked = await monitor_operation(validate, monitor)
         if not checked.validation.valid:
             raise RunnerError("artifact_invalid", "Configured PNG validator rejected the image.")
-    return MediaAttachment(data=data, path=logical, width=width, height=height)
+    assert profile.image_accounting is not None
+    return MediaAttachment(
+        data=data,
+        path=logical,
+        width=width,
+        height=height,
+        image_accounting=profile.image_accounting,
+    )
