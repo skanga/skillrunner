@@ -319,3 +319,20 @@ async def test_content_logging_redacts_serialized_history_without_changing_reque
     assert "public observation" in events
     assert "private reasoning marker" not in events
     assert "opaque credential marker" not in events
+
+
+@pytest.mark.parametrize("content", [None, "", "Partial answer"])
+@pytest.mark.parametrize("usage", [None, ModelUsage(100, 2000, 2100)])
+@pytest.mark.parametrize("calls", [(), reply().tool_calls])
+async def test_length_response_stops_after_accounting_without_dispatch(content, usage, calls):
+    response = ModelReply(content, calls, "length", usage, "request")
+    loop, adapter, context, ledger = setup([response])
+    with pytest.raises(RunnerError, match="output-token") as caught:
+        await loop.run()
+    assert caught.value.code == "budget_exhausted"
+    assert len(adapter.requests) == 1
+    assert ledger.charged_tool_calls == 0
+    assert len(ledger.records) == 1
+    assert ledger.records[0].quality == ("reported" if usage else "estimated")
+    assert ledger.records[0].output_tokens == 2000
+    assert loop.last_reply == response

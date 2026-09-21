@@ -161,12 +161,17 @@ def _normalize(payload: Any, request_id: str | None) -> ModelReply:
             raw = function["arguments"]
             if not isinstance(raw, str):
                 raise ValueError
+            ids.add(call_id)
+            if finish == "length":
+                # Truncated arguments are not an executable action batch.
+                continue
             arguments = json.loads(raw, parse_constant=_reject_constant, parse_float=_finite_float)
             if not isinstance(arguments, dict):
                 raise ValueError
-            ids.add(call_id)
             normalized.append(ModelToolCall(call_id, name, arguments, raw))
-        if (bool(calls) != (finish == "tool_calls")) or (not calls and not (content or "").strip()):
+        if finish != "length" and (
+            (bool(calls) != (finish == "tool_calls")) or (not calls and not (content or "").strip())
+        ):
             raise ValueError
         return ModelReply(
             content, tuple(normalized), finish, _usage(payload.get("usage")), request_id

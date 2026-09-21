@@ -170,7 +170,11 @@ class AgentLoop:
                 self.ledger.reconcile(
                     reservation,
                     input_tokens=estimate,
-                    output_tokens=returned_output_estimate(reply),
+                    output_tokens=(
+                        reservation.output_limit
+                        if reply.finish_reason == "length"
+                        else returned_output_estimate(reply)
+                    ),
                     quality="estimated",
                 )
             else:
@@ -202,6 +206,12 @@ class AgentLoop:
                     },
                 },
             )
+            if reply.finish_reason == "length":
+                raise RunnerError(
+                    "budget_exhausted",
+                    "The model reached this request's output-token allowance. "
+                    "Partial outputs are preserved; no returned tools were dispatched.",
+                )
             self.context.append_public_reply(reply.public_text, reply.tool_calls)
             await asyncio.sleep(0)
             self.deadline.check()
