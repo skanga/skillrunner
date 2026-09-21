@@ -7,12 +7,13 @@ $evidence = Join-Path $env:RUNNER_TEMP 'no-posix-evidence'
 New-Item -ItemType Directory -Force $evidence | Out-Null
 $names = @('bash.exe', 'sh.exe', 'zsh.exe', 'dash.exe', 'busybox.exe')
 $drives = @(Get-CimInstance Win32_LogicalDisk | Where-Object DriveType -eq 3 | ForEach-Object { $_.DeviceID + '\' })
-$found = @()
-foreach ($drive in $drives) {
-    $matches = @(& "$env:SystemRoot\System32\where.exe" /R $drive @names 2> (Join-Path $evidence ('scan-' + $drive[0] + '.txt')))
-    if ($LASTEXITCODE -notin @(0, 1)) { throw "Shell inventory failed on $drive ($LASTEXITCODE)" }
-    $found += $matches | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
-}
+$phase = if ($RemoveShells) { 'before' } else { 'after' }
+$inventoryPath = Join-Path $evidence "inventory-$phase.json"
+& .venv/Scripts/python.exe scripts/inventory_posix_shells.py $inventoryPath @drives
+if ($LASTEXITCODE) { throw 'Shell inventory failed' }
+$inventory = Get-Content -Raw $inventoryPath | ConvertFrom-Json
+$found = @($inventory.shells)
+Write-Output "Inventory exclusions (retained for review): $($inventory.inaccessible.Count)"
 $distributions = @(Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss' -ErrorAction SilentlyContinue | ForEach-Object { (Get-ItemProperty $_.PSPath).DistributionName } | Where-Object { $_ })
 $distributions | ConvertTo-Json -AsArray | Set-Content (Join-Path $evidence 'wsl-distributions.json')
 if ($distributions.Count) { throw "Unexpected WSL distributions: $($distributions -join ', ')" }
