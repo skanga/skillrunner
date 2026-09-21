@@ -670,3 +670,56 @@ async def test_truncated_arguments_without_usage_are_counted_but_not_dispatchabl
         assert "PRIVATE_REASONING" not in repr(result)
     finally:
         await client.aclose()
+
+
+@pytest.mark.parametrize(
+    "choice,field",
+    [
+        (None, "choices"),
+        ({"finish_reason": "PRIVATE", "message": {}}, "choices[0].finish_reason"),
+        ({"finish_reason": "stop", "message": {"role": "PRIVATE"}}, "choices[0].message.role"),
+        (
+            {"finish_reason": "stop", "message": {"role": "assistant", "content": {"PRIVATE": 1}}},
+            "choices[0].message.content",
+        ),
+        (
+            {
+                "finish_reason": "tool_calls",
+                "message": {"role": "assistant", "tool_calls": "PRIVATE"},
+            },
+            "choices[0].message.tool_calls",
+        ),
+        (
+            {
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "one",
+                            "type": "function",
+                            "function": {"name": "read_text", "arguments": "PRIVATE"},
+                        }
+                    ],
+                },
+            },
+            "choices[0].message.tool_calls[].function.arguments",
+        ),
+        (
+            {"finish_reason": "tool_calls", "message": {"role": "assistant", "content": "PRIVATE"}},
+            "completion_consistency",
+        ),
+    ],
+)
+async def test_protocol_errors_identify_safe_response_field(choice, field):
+    payload = reply(choices=[] if choice is None else [choice])
+    client = adapter(profile(), lambda request: httpx.Response(200, json=payload))
+    try:
+        with pytest.raises(RunnerError) as exc:
+            await client.complete([], [], 17, deadline())
+        assert exc.value.code == "model_protocol_error"
+        assert exc.value.details["response_field"] == field
+        assert "PRIVATE" not in str(exc.value)
+        assert "PRIVATE" not in json.dumps(exc.value.details)
+    finally:
+        await client.aclose()
