@@ -1690,3 +1690,73 @@ async def test_output_length_exits_seven_preserving_partial_and_existing_output(
         event["event_type"] == "tool_started" and event["payload"].get("name") == "finish_run"
         for event in events
     )
+
+
+@pytest.mark.parametrize("names", [[], ["writer"], ["writer", "internal-comms", "中文"]])
+async def test_activation_schema_exposes_only_valid_catalog_names(tmp_path, monkeypatch, names):
+    from skillrunner.tools.schemas import ActivateSkillArgs
+
+    settings = fixture(tmp_path, skill=False)
+    for name in [*names, "rejected"]:
+        package = tmp_path / "skills" / name
+        package.mkdir(parents=True)
+        declared = name if name != "rejected" else "wrong-name"
+        (package / "SKILL.md").write_text(
+            f"---\nname: {declared}\ndescription: Write reports.\n---\nWrite clearly.",
+            encoding="utf-8",
+        )
+    captured = []
+    original = api().Coordinator._bind_tools
+
+    def bind(coordinator):
+        original(coordinator)
+        captured.extend(coordinator.tools.model_schemas())
+
+    monkeypatch.setattr(api().Coordinator, "_bind_tools", bind)
+    adapters = []
+
+    def factory(profile, key):
+        adapter = Adapter(profile, [finish("no_matching_skill")])
+        adapters.append(adapter)
+        return adapter
+
+    await api().run_task(
+        RunRequest(prompt="Write a report", invocation_directory=tmp_path),
+        settings,
+        environ={},
+        adapter_factory=factory,
+    )
+    if not names:
+        assert not captured
+        assert not adapters
+        return
+    schema = next(
+        x["function"]["parameters"] for x in captured if x["function"]["name"] == "activate_skill"
+    )
+    assert schema["properties"]["name"].get("enum") == (sorted(names) or None)
+    if names:
+        advertised = next(
+            x["function"]["parameters"]
+            for x in adapters[0].tool_schemas[0]
+            if x["function"]["name"] == "activate_skill"
+        )
+        assert advertised == schema
+        schema["properties"]["name"]["enum"].append("mutated")
+        assert advertised["properties"]["name"]["enum"] == sorted(names)
+    assert "enum" not in ActivateSkillArgs.model_json_schema()["properties"]["name"]
+
+
+async def test_activation_does_not_correct_misspelled_catalog_name(tmp_path):
+    def after_rejection(messages):
+        result = json.loads(messages[-1]["content"])
+        assert result["ok"] is False
+        return finish("no_matching_skill")
+
+    receipt, _ = await run(
+        tmp_path,
+        [[call("activate_skill", {"name": "Writer", "reason": "Write"})], after_rejection],
+        skills=(),
+    )
+    assert receipt["status"] == "no_matching_skill"
+    manifest = json.loads(Path(receipt["manifest_path"]).read_text())
+    assert not manifest["provenance"]["activated_skills"]

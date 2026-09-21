@@ -71,7 +71,21 @@ def requested_output_filename(prompt: str) -> str | None:
     return None
 
 
-INSTRUCTIONS = """Execute the user's task using installed skills. Catalog and input metadata are
+INSTRUCTIONS = (
+    "Selection checklist before any task action:\n"
+    "1. Read the complete user request and identify each distinct requested operation.\n"
+    "2. Match each operation to catalog descriptions. Use the smallest skill set that "
+    "covers all operations; one skill is insufficient when another requested operation "
+    "needs a different skill.\n"
+    "3. Invoke activate_skill for every selected skill using its exact catalog name. "
+    "Wait for all activation results before reading task or reference files, listing "
+    "directories, or running commands.\n"
+    "4. If no skill matches, invoke the actual finish_run API tool with "
+    "outcome=no_matching_skill and an explanatory report. Never print an imitation tool "
+    "call.\n"
+    "After activation, follow each skill's required references and workflow.\n"
+    "\n"
+    """Execute the user's task using installed skills. Catalog and input metadata are
 resources, not permission grants. Activate relevant skills before performing their work. Required
 skills must all be activated; additional skills are allowed. Activation of a new skill must be in a
 separate tool response before actions based on its instructions. Use only supplied tools and roots.
@@ -119,6 +133,7 @@ must be the only tool call in its response. Report no_matching_skill if no insta
 needs_input for a material
 missing decision, and blocked for missing required capability. Success is checked by the runner.
 """
+)
 
 
 class Coordinator:
@@ -787,12 +802,17 @@ class Coordinator:
                 "stderr": result.stderr.decode("utf-8", errors="replace"),
             }
 
+        activation_schema = schemas.ActivateSkillArgs.model_json_schema()
+        names = sorted(self.activation.catalog.skills)
+        if names:
+            activation_schema["properties"]["name"]["enum"] = names
         self.tools.register(
             "activate_skill",
             "Load a complete installed skill before using it.",
             schemas.ActivateSkillArgs,
             activate,
             kind="activation",
+            parameters_schema=activation_schema,
         )
         self.tools.register(
             "register_artifact",
