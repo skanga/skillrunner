@@ -37,9 +37,10 @@ def test_patch_accounting_includes_rounding_allowance(width, height, expected):
 
 
 @pytest.mark.parametrize("width,height", [(0, 1), (1, 0), (-1, 2), (True, 10), (2**32, 1)])
-def test_invalid_dimensions_fail(width, height):
+@pytest.mark.parametrize("contract", ["openai-patch-high-v1", "gemma4-image-max-v1"])
+def test_invalid_dimensions_fail(width, height, contract):
     with pytest.raises(RunnerError):
-        media_api().image_tokens(width, height)
+        media_api().image_tokens(width, height, contract)
 
 
 def test_png_dimensions_requires_ihdr():
@@ -259,3 +260,45 @@ async def test_media_validation_cancellation_removes_copy(tmp_path, monkeypatch)
         )
     assert source.read_bytes() == data
     assert list(staging.iterdir()) == []
+
+
+@pytest.mark.parametrize("width,height", [(1, 1), (480, 180), (4096, 4096)])
+def test_gemma_contract_reserves_maximum_and_preserves_mixed_history(width, height):
+    from skillrunner.runtime.budgets import UsageLedger
+
+    contract = "gemma4-image-max-v1"
+    assert (
+        DirectModel(input_modalities=["text", "image"], image_accounting=contract).image_accounting
+        == contract
+    )
+    api = media_api()
+    gemma = api.MediaAttachment(
+        data=b"gemma-image",
+        path="scratch/g.png",
+        width=width,
+        height=height,
+        image_accounting=contract,
+    )
+    openai = api.MediaAttachment(data=b"openai-image", path="scratch/o.png", width=32, height=32)
+    assert gemma.tokens == 1122
+    assert gemma.metadata()["image_accounting"] == contract
+    context = RunContext(runner_instructions="rules", prompt="task", catalog=[])
+    context.append_media([gemma, openai, gemma])
+    assert context.image_token_estimate == 2247
+    assert context.estimate([]) == context.estimate([])
+    assert "Z2VtbWEtaW1hZ2U=" not in json.dumps(context.diagnostic_messages())
+    with pytest.raises(RunnerError, match="context_capacity_exceeded"):
+        UsageLedger(max_steps=2, max_tool_calls=2, max_tokens=100000).reserve_model(
+            input_tokens=context.estimate([]), context_window=2000, max_output=100
+        )
+
+
+def test_attachment_rejects_unknown_contract():
+    with pytest.raises(RunnerError, match="unsupported_capability"):
+        _ = (
+            media_api()
+            .MediaAttachment(
+                data=b"x", path="scratch/x.png", width=1, height=1, image_accounting="unknown"
+            )
+            .tokens
+        )

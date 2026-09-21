@@ -269,10 +269,11 @@ max_output_tokens = 128000
     assert json.loads(args.result.read_text()) == result
 
 
-def test_unbilled_qualification_rates_are_scoped_to_approved_endpoint():
-    profile = SimpleNamespace(
-        model="hosted_vllm/openai/gpt-oss-120b", base_url="https://ehl.infra.adobe.net/v1"
-    )
+@pytest.mark.parametrize(
+    "model", ["hosted_vllm/openai/gpt-oss-120b", "hosted_vllm/google/gemma-4-26B-A4B-it"]
+)
+def test_unbilled_qualification_rates_are_scoped_to_approved_endpoint(model):
+    profile = SimpleNamespace(model=model, base_url="https://ehl.infra.adobe.net/v1")
     rates, basis = run.qualification_rates(profile)
     assert rates.cost(131072, 131072) == Decimal("0")
     assert "unbilled" in basis

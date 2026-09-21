@@ -11,12 +11,18 @@ from typing import Any
 from skillrunner.domain.errors import RunnerError
 
 IMAGE_ACCOUNTING = "openai-patch-high-v1"
+IMAGE_ACCOUNTING_CONTRACTS = (IMAGE_ACCOUNTING, "gemma4-image-max-v1")
 
 
-def image_tokens(width: int, height: int) -> int:
-    """Published 32px patches, high detail, 1.2 multiplier, plus rounding allowance."""
+def image_tokens(width: int, height: int, contract: str = IMAGE_ACCOUNTING) -> int:
+    """Estimate an image using the explicitly selected deployment contract."""
     if any(type(n) is not int or not 0 < n < 2**31 for n in (width, height)):
         raise RunnerError("unsupported_capability", "Invalid PNG dimensions.")
+    if contract == "gemma4-image-max-v1":
+        # Standard Gemma 4 processor: up to 1120 visual tokens plus two boundaries.
+        return 1122
+    if contract != IMAGE_ACCOUNTING:
+        raise RunnerError("unsupported_capability", "Unknown image accounting contract.")
     scale = min(1.0, 2048 / max(width, height))
     width, height = max(1, int(width * scale)), max(1, int(height * scale))
     if math.ceil(width / 32) * math.ceil(height / 32) > 2500:
@@ -45,10 +51,11 @@ class MediaAttachment:
     path: str
     width: int
     height: int
+    image_accounting: str = IMAGE_ACCOUNTING
 
     @property
     def tokens(self) -> int:
-        return image_tokens(self.width, self.height)
+        return image_tokens(self.width, self.height, self.image_accounting)
 
     def metadata(self) -> dict[str, Any]:
         return {
@@ -59,7 +66,7 @@ class MediaAttachment:
             "width": self.width,
             "height": self.height,
             "detail": "high",
-            "image_accounting": IMAGE_ACCOUNTING,
+            "image_accounting": self.image_accounting,
             "image_token_estimate": self.tokens,
         }
 
