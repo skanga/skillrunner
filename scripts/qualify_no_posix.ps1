@@ -20,6 +20,7 @@ if ($distributions.Count) { throw "Unexpected WSL distributions: $($distribution
 # Windows' signed WSL launchers are not POSIX shell implementations. They are
 # allowed only with no registered distribution; never mutate Windows servicing files.
 $launchers = @()
+$servicingData = @()
 $shells = @()
 foreach ($path in ($found | Sort-Object -Unique)) {
     $isWindowsLauncher = [IO.Path]::GetFileName($path) -eq 'bash.exe' -and (
@@ -28,6 +29,15 @@ foreach ($path in ($found | Sort-Object -Unique)) {
         $path.StartsWith("$env:SystemRoot\WinSxS\", [StringComparison]::OrdinalIgnoreCase)
     )
     if ($isWindowsLauncher) {
+        if ($path -match '\\winsxs\\[^\\]+\\r\\bash\.exe$') {
+            $stream = [IO.File]::OpenRead($path)
+            try { $first = $stream.ReadByte(); $second = $stream.ReadByte() }
+            finally { $stream.Dispose() }
+            if ($first -ne 0x4d -or $second -ne 0x5a) {
+                $servicingData += @{path=$path; first_bytes=@($first,$second); reason='Non-MZ servicing data, not a Windows executable'}
+                continue
+            }
+        }
         $signature = Get-AuthenticodeSignature -LiteralPath $path
         if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Microsoft') {
             throw "Unverified Windows launcher: $path"
@@ -36,7 +46,7 @@ foreach ($path in ($found | Sort-Object -Unique)) {
     } else { $shells += $path }
 }
 $phase = if ($RemoveShells) { 'before' } else { 'after' }
-@{phase=$phase; drives=$drives; shells=$shells; windows_wsl_launchers=$launchers; wsl_distributions=$distributions; commit=$env:GITHUB_SHA} |
+@{phase=$phase; drives=$drives; shells=$shells; windows_wsl_launchers=$launchers; non_executable_servicing_data=$servicingData; wsl_distributions=$distributions; commit=$env:GITHUB_SHA} |
     ConvertTo-Json -Depth 5 | Set-Content (Join-Path $evidence "$phase.json")
 if ($RemoveShells) {
     if (-not $shells.Count) { throw 'Expected a stock hosted image containing POSIX shells for the removal check.' }
