@@ -185,4 +185,5 @@ If a model response reaches its output-token limit (`finish_reason="length"`),
 the runner accounts for usage and exits with code 7 (`limit_exceeded`). It preserves
 partial artifacts and the failure report, leaves an unpublished destination unchanged,
 and neither dispatches returned tools nor retries that response. When the provider
-omits usage, the output allowance is charged as an estimate.
+omits usage, returned public text and tool-call content (including truncated
+arguments) are charged using the documented UTF-8 estimate.

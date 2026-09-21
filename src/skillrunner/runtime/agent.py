@@ -33,7 +33,10 @@ def returned_output_estimate(reply: ModelReply) -> int:
             for call in reply.tool_calls
         ],
     }
-    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    return (
+        len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        + reply.discarded_tool_call_bytes
+    )
 
 
 class AgentLoop:
@@ -170,11 +173,7 @@ class AgentLoop:
                 self.ledger.reconcile(
                     reservation,
                     input_tokens=estimate,
-                    output_tokens=(
-                        reservation.output_limit
-                        if reply.finish_reason == "length"
-                        else returned_output_estimate(reply)
-                    ),
+                    output_tokens=returned_output_estimate(reply),
                     quality="estimated",
                 )
             else:

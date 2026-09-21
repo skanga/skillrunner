@@ -633,3 +633,40 @@ async def test_length_response_still_rejects_malformed_envelopes(message):
         assert caught.value.code == "model_protocol_error"
     finally:
         await client.aclose()
+
+
+async def test_truncated_arguments_without_usage_are_counted_but_not_dispatchable():
+    from skillrunner.runtime.agent import returned_output_estimate
+
+    arguments = '{"content":"' + "界" * 500
+    payload = reply(
+        choices=[
+            {
+                "finish_reason": "length",
+                "message": {
+                    "role": "assistant",
+                    "content": "Partial",
+                    "tool_calls": [
+                        {
+                            "id": "one",
+                            "type": "function",
+                            "function": {
+                                "name": "write_file",
+                                "arguments": arguments,
+                            },
+                        }
+                    ],
+                    "reasoning_content": "PRIVATE_REASONING" * 1000,
+                },
+            }
+        ]
+    )
+    client = adapter(profile(), lambda request: httpx.Response(200, json=payload))
+    try:
+        result = await client.complete([], [], 4096, deadline())
+        assert result.usage is None
+        assert result.tool_calls == ()
+        assert len(arguments.encode("utf-8")) <= returned_output_estimate(result) < 2000
+        assert "PRIVATE_REASONING" not in repr(result)
+    finally:
+        await client.aclose()
