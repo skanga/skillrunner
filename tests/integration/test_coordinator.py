@@ -1635,3 +1635,58 @@ async def test_png_media_uses_validated_copy_and_metadata_only_logs(tmp_path, mo
     )
     assert base64.b64encode(png).decode() not in logs
     assert not list(root.glob("work/staging/media-*"))
+
+
+async def test_output_length_exits_seven_preserving_partial_and_existing_output(tmp_path):
+    settings = fixture(tmp_path)
+    output = tmp_path / "published.txt"
+    output.write_text("previous output")
+
+    class LengthAdapter(Adapter):
+        async def complete(self, messages, tool_schemas, output_limit, request_deadline):
+            if self.requests:
+                self.requests.append(messages)
+                return ModelReply(
+                    "Incomplete", tuple(finish()[0:1]), "length", ModelUsage(100, 4000, 4100), None
+                )
+            return await super().complete(messages, tool_schemas, output_limit, request_deadline)
+
+    adapter = LengthAdapter(settings.models["test"], [artifact_calls()[0]])
+    receipt = await api().run_task(
+        RunRequest(
+            prompt="Write",
+            invocation_directory=tmp_path,
+            required_skills=["writer"],
+            output=output,
+            overwrite=True,
+        ),
+        settings,
+        environ={},
+        adapter_factory=lambda profile, key: adapter,
+    )
+    assert receipt["exit_code"] == 7
+    assert receipt["status"] == "limit_exceeded"
+    assert receipt["errors"][0]["code"] == "budget_exhausted"
+    assert "output-token" in receipt["errors"][0]["message"]
+    assert len(adapter.requests) == 2
+    assert output.read_text() == "previous output"
+    assert Path(receipt["artifact_paths"][0]).read_text() == "generated output"
+    assert Path(receipt["report_path"]).is_file()
+    manifest = json.loads(Path(receipt["manifest_path"]).read_text())
+    assert manifest["lifecycle"]["status"] == "limit_exceeded"
+    events = [
+        json.loads(line)
+        for line in (Path(receipt["manifest_path"]).parent / "events.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    completed = [
+        event["payload"] for event in events if event["event_type"] == "model_request_completed"
+    ]
+    assert completed[-1]["finish_reason"] == "length"
+    assert completed[-1]["output_tokens"] == 4000
+    assert completed[-1]["measurement_quality"] == "reported"
+    assert not any(
+        event["event_type"] == "tool_started" and event["payload"].get("name") == "finish_run"
+        for event in events
+    )

@@ -573,3 +573,63 @@ async def test_completion_json_integer_limit_failure_is_safe() -> None:
         assert "PRIVATE" not in str(exc.value)
     finally:
         await client.aclose()
+
+
+@pytest.mark.parametrize("content", [None, "", "Partial answer"])
+@pytest.mark.parametrize("arguments", [None, '{"path":', '{"path":"scratch/file"}'])
+async def test_length_response_preserves_usage_without_action_batch(content, arguments):
+    message = {"role": "assistant", "content": content}
+    if arguments is not None:
+        message["tool_calls"] = [
+            {
+                "id": "one",
+                "type": "function",
+                "function": {
+                    "name": "read_text",
+                    "arguments": arguments,
+                },
+            }
+        ]
+    payload = reply(
+        choices=[{"finish_reason": "length", "message": message}],
+        usage={"prompt_tokens": 100, "completion_tokens": 17, "total_tokens": 117},
+    )
+    client = adapter(profile(), lambda request: httpx.Response(200, json=payload))
+    try:
+        result = await client.complete([], [], 17, deadline())
+        assert result.finish_reason == "length"
+        assert result.public_text == content
+        assert result.tool_calls == ()
+        assert result.usage.input_tokens == 100
+        assert result.usage.output_tokens == 17
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"role": "user", "content": "partial"},
+        {"role": "assistant", "content": {}},
+        {"role": "assistant", "tool_calls": "invalid"},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "one",
+                    "type": "function",
+                    "function": {"name": "read_text", "arguments": {}},
+                }
+            ],
+        },
+    ],
+)
+async def test_length_response_still_rejects_malformed_envelopes(message):
+    payload = reply(choices=[{"finish_reason": "length", "message": message}])
+    client = adapter(profile(), lambda request: httpx.Response(200, json=payload))
+    try:
+        with pytest.raises(RunnerError) as caught:
+            await client.complete([], [], 17, deadline())
+        assert caught.value.code == "model_protocol_error"
+    finally:
+        await client.aclose()
