@@ -48,8 +48,13 @@ class ResolvedCapabilities:
     metadata_source: str
 
 
-def _protocol_error() -> RunnerError:
-    return RunnerError("model_protocol_error", "The endpoint returned an invalid model response.")
+def _protocol_error(field: str | None = None) -> RunnerError:
+    # Field labels are fixed by the decoder, never copied from endpoint content.
+    return RunnerError(
+        "model_protocol_error",
+        "The endpoint returned an invalid model response.",
+        details={"response_field": field} if field else {},
+    )
 
 
 def _status_error(status: int, code: str | None = None) -> RunnerError:
@@ -123,20 +128,25 @@ def _finite_float(value: str) -> float:
 
 
 def _normalize(payload: Any, request_id: str | None) -> ModelReply:
+    field = "choices"
     try:
         choices = payload["choices"]
         if not isinstance(choices, list) or len(choices) != 1:
             raise ValueError
         choice = choices[0]
+        field = "choices[0].finish_reason"
         finish = choice["finish_reason"]
         if finish not in {"stop", "length", "tool_calls", "content_filter"}:
             raise ValueError
+        field = "choices[0].message.role"
         message = choice["message"]
         if message.get("role") != "assistant" or message.get("function_call") is not None:
             raise ValueError
+        field = "choices[0].message.content"
         content = message.get("content")
         if content is not None and not isinstance(content, str):
             raise ValueError
+        field = "choices[0].message.tool_calls"
         calls = message.get("tool_calls")
         if calls is None:
             calls = []
@@ -146,6 +156,7 @@ def _normalize(payload: Any, request_id: str | None) -> ModelReply:
         discarded_tool_call_bytes = 0
         ids: set[str] = set()
         for call in calls:
+            field = "choices[0].message.tool_calls[].metadata"
             call_id = call["id"]
             function = call["function"]
             name = function["name"]
@@ -159,6 +170,7 @@ def _normalize(payload: Any, request_id: str | None) -> ModelReply:
                 or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name)
             ):
                 raise ValueError
+            field = "choices[0].message.tool_calls[].function.arguments"
             raw = function["arguments"]
             if not isinstance(raw, str):
                 raise ValueError
@@ -177,6 +189,7 @@ def _normalize(payload: Any, request_id: str | None) -> ModelReply:
             if not isinstance(arguments, dict):
                 raise ValueError
             normalized.append(ModelToolCall(call_id, name, arguments, raw))
+        field = "completion_consistency"
         if finish != "length" and (
             (bool(calls) != (finish == "tool_calls")) or (not calls and not (content or "").strip())
         ):
@@ -190,7 +203,7 @@ def _normalize(payload: Any, request_id: str | None) -> ModelReply:
             discarded_tool_call_bytes,
         )
     except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
-        raise _protocol_error() from None
+        raise _protocol_error(field) from None
 
 
 class OpenAICompatibleAdapter:
