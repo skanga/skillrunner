@@ -1,39 +1,50 @@
 name: Windows no-POSIX-shell qualification
-
 on:
+  push:
+    branches: [ci/hosted-no-posix]
   workflow_dispatch:
-
 permissions:
   contents: read
-
 jobs:
   qualify:
-    if: github.repository == 'skanga/skillrunner' && github.ref == 'refs/heads/main'
-    runs-on: [self-hosted, Windows, X64, skillrunner-no-posix]
+    runs-on: windows-2025
     timeout-minutes: 30
     defaults:
       run:
-        shell: powershell
+        shell: pwsh
     steps:
-      - name: Check native host tools and shell absence on PATH
-        run: |
-          $ErrorActionPreference = 'Stop'
-          python --version
-          node --version
-          uv --version
-          foreach ($name in @('sh', 'bash', 'zsh', 'dash', 'busybox')) {
-            $matches = @(Get-Command $name -All -ErrorAction SilentlyContinue)
-            if ($matches.Count -ne 0) {
-              throw "POSIX shell command is discoverable: $name"
-            }
-          }
-          Write-Output 'No POSIX shell command is discoverable on the runner PATH.'
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - name: Install locked test dependencies
-        run: uv sync --locked --dev
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          version: '0.12.5'
+          python-version: '3.14'
+      - name: Install locked dependencies before removing shells
+        run: |
+          uv sync --locked --dev
+          if ($LASTEXITCODE) { throw 'Dependency installation failed' }
+          node --version
+          if ($LASTEXITCODE) { throw 'Node.js is required; no skipped Node qualification' }
+      - name: Inventory and remove POSIX shell executables
+        run: ./scripts/qualify_no_posix.ps1 -RemoveShells
+      - name: Independently verify shell absence before tests
+        run: ./scripts/qualify_no_posix.ps1
       - name: Run native no-shell runtime contracts
-        run: uv run --locked pytest -q tests/integration/test_windows_runtime_acceptance.py
-      - name: Smoke test installed command
-        run: uv run --locked skillrun run --help
+        run: |
+          uv run --locked --offline pytest -q tests/integration/test_windows_runtime_acceptance.py --junitxml="$env:RUNNER_TEMP/no-posix-evidence/tests.xml"
+          if ($LASTEXITCODE) { throw 'Runtime qualification failed' }
+          [xml]$results = Get-Content "$env:RUNNER_TEMP/no-posix-evidence/tests.xml"
+          $suite = $results.testsuites.testsuite
+          if ([int]$suite.tests -ne 4 -or [int]$suite.skipped -ne 0) { throw 'Expected exactly four executed, unskipped runtime cases' }
+          uv run --locked --offline skillrun run --help
+          if ($LASTEXITCODE) { throw 'CLI smoke check failed' }
+      - name: Verify shell absence after tests
+        run: ./scripts/qualify_no_posix.ps1
+      - name: Retain host inventory and test results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-no-posix-evidence
+          path: ${{ runner.temp }}/no-posix-evidence
+          if-no-files-found: error
