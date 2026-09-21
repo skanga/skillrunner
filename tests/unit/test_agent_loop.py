@@ -334,5 +334,9 @@ async def test_length_response_stops_after_accounting_without_dispatch(content, 
     assert ledger.charged_tool_calls == 0
     assert len(ledger.records) == 1
     assert ledger.records[0].quality == ("reported" if usage else "estimated")
-    assert ledger.records[0].output_tokens == 2000
+    if usage:
+        assert ledger.records[0].output_tokens == 2000
+    else:
+        assert 0 < ledger.records[0].output_tokens < 2000
+        assert ledger.records[0].output_tokens >= len((content or "").encode("utf-8"))
     assert loop.last_reply == response

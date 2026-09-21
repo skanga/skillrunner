@@ -26,6 +26,8 @@ class ModelReply:
     finish_reason: str
     usage: ModelUsage | None
     provider_request_id: str | None
+    # UTF-8 bytes of discarded truncated tool content; no executable calls retained.
+    discarded_tool_call_bytes: int = 0
 
 
 class ModelAdapter(Protocol):

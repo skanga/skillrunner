@@ -143,6 +143,7 @@ def _normalize(payload: Any, request_id: str | None) -> ModelReply:
         if not isinstance(calls, list):
             raise ValueError
         normalized = []
+        discarded_tool_call_bytes = 0
         ids: set[str] = set()
         for call in calls:
             call_id = call["id"]
@@ -163,7 +164,14 @@ def _normalize(payload: Any, request_id: str | None) -> ModelReply:
                 raise ValueError
             ids.add(call_id)
             if finish == "length":
-                # Truncated arguments are not an executable action batch.
+                # Count returned tool content without retaining an executable batch.
+                discarded_tool_call_bytes += len(
+                    json.dumps(
+                        {"id": call_id, "name": name, "arguments": raw},
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ) + (1 if discarded_tool_call_bytes else 0)
                 continue
             arguments = json.loads(raw, parse_constant=_reject_constant, parse_float=_finite_float)
             if not isinstance(arguments, dict):
@@ -174,7 +182,12 @@ def _normalize(payload: Any, request_id: str | None) -> ModelReply:
         ):
             raise ValueError
         return ModelReply(
-            content, tuple(normalized), finish, _usage(payload.get("usage")), request_id
+            content,
+            tuple(normalized),
+            finish,
+            _usage(payload.get("usage")),
+            request_id,
+            discarded_tool_call_bytes,
         )
     except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
         raise _protocol_error() from None
