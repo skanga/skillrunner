@@ -719,7 +719,44 @@ async def test_protocol_errors_identify_safe_response_field(choice, field):
             await client.complete([], [], 17, deadline())
         assert exc.value.code == "model_protocol_error"
         assert exc.value.details["response_field"] == field
+        assert exc.value.details.get("retryable") is not True
         assert "PRIVATE" not in str(exc.value)
         assert "PRIVATE" not in json.dumps(exc.value.details)
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize("content", [None, "", " \n\t"])
+@pytest.mark.parametrize("tools", [None, []])
+async def test_empty_stop_is_retryable_but_still_protocol_error(content, tools):
+    payload = reply(
+        choices=[
+            {
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": content, "tool_calls": tools},
+            }
+        ]
+    )
+    client = adapter(profile(), lambda request: httpx.Response(200, json=payload))
+    try:
+        with pytest.raises(RunnerError) as exc:
+            await client.complete([], [], 17, deadline())
+        assert exc.value.code == "model_protocol_error"
+        assert exc.value.details["retryable"] is True
+        assert exc.value.details["response_field"] == "completion_consistency"
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize("finish", ["tool_calls", "content_filter"])
+async def test_other_empty_terminal_shapes_are_not_retryable(finish):
+    payload = reply(
+        choices=[{"finish_reason": finish, "message": {"role": "assistant", "content": None}}]
+    )
+    client = adapter(profile(), lambda request: httpx.Response(200, json=payload))
+    try:
+        with pytest.raises(RunnerError) as exc:
+            await client.complete([], [], 17, deadline())
+        assert exc.value.details.get("retryable") is not True
     finally:
         await client.aclose()

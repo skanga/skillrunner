@@ -190,6 +190,16 @@ def _normalize(payload: Any, request_id: str | None) -> ModelReply:
                 raise ValueError
             normalized.append(ModelToolCall(call_id, name, arguments, raw))
         field = "completion_consistency"
+        if finish == "stop" and not calls and not (content or "").strip():
+            failure = _protocol_error(field)
+            failure.details.update(
+                retryable=True,
+                outcome_certainty="known",
+                suggested_action=(
+                    "Retry the empty completion within the configured retry allowance and budgets."
+                ),
+            )
+            raise failure
         if finish != "length" and (
             (bool(calls) != (finish == "tool_calls")) or (not calls and not (content or "").strip())
         ):
@@ -202,6 +212,8 @@ def _normalize(payload: Any, request_id: str | None) -> ModelReply:
             request_id,
             discarded_tool_call_bytes,
         )
+    except RunnerError:
+        raise
     except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
         raise _protocol_error(field) from None
 

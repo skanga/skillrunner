@@ -136,6 +136,12 @@ class AgentLoop:
                             {
                                 "attempt": reservation.attempt,
                                 "error_code": code,
+                                **(
+                                    {"response_field": failure.details["response_field"]}
+                                    if isinstance(failure, RunnerError)
+                                    and "response_field" in failure.details
+                                    else {}
+                                ),
                                 "measurement_quality": "unknown",
                                 "actual_usage": None,
                                 "budget_charge": reservation.total,
