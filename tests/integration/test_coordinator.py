@@ -1164,7 +1164,9 @@ async def test_publication_events_record_actual_commit_state(tmp_path, monkeypat
     )
 
 
-async def test_post_publication_reporting_failure_keeps_output(tmp_path, monkeypatch):
+@pytest.mark.parametrize("failed_file", ["manifest", "report"])
+async def test_post_publication_reporting_failure_keeps_output(tmp_path, monkeypatch, failed_file):
+    from skillrunner.recording import bundle as bundle_module
     from skillrunner.recording.bundle import RunBundle
 
     original = RunBundle.save
@@ -1174,13 +1176,24 @@ async def test_post_publication_reporting_failure_keeps_output(tmp_path, monkeyp
             raise OSError("Cannot save report state")
         return original(bundle)
 
-    monkeypatch.setattr(RunBundle, "save", fail_final)
     output = tmp_path / "published.md"
+    original_write = bundle_module.atomic_write
+
+    def fail_report(path, content):
+        if path.name == "result.md" and output.exists():
+            raise OSError("Cannot write final report")
+        return original_write(path, content)
+
+    if failed_file == "manifest":
+        monkeypatch.setattr(RunBundle, "save", fail_final)
+    else:
+        monkeypatch.setattr(bundle_module, "atomic_write", fail_report)
     receipt, _ = await run(tmp_path, [finish()], output=output)
     assert receipt["status"] == "failed"
     assert receipt["primary_output"] == str(output)
     assert output.read_text() == "Completed answer."
     assert receipt["errors"][-1]["code"] == "post_publication_reporting_failed"
+    assert receipt["exit_code"] != 0
 
 
 @pytest.mark.parametrize("competing", [False, True])
