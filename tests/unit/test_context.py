@@ -73,3 +73,16 @@ def test_long_instructions_and_history_are_never_silently_truncated():
     resources = json.loads(messages[2]["content"].split("\n", 1)[1])
     assert resources["active_skills"][0]["instructions"] == instructions
     assert [message["content"] for message in messages[3:]] == [f"turn {n}" for n in range(50)]
+
+
+def test_response_capacity_is_included_in_context_accounting():
+    from skillrunner.runtime.budgets import estimate_text_tokens
+
+    context = api().RunContext(runner_instructions="rules", prompt="task", catalog=[])
+    before = context.estimate([])
+    context.set_response_capacity(4096)
+    messages = context.messages()
+    resources = json.loads(messages[2]["content"].split("\n", 1)[1])
+    assert resources["model_capacity"] == {"max_output_tokens": 4096}
+    assert context.estimate([]) == estimate_text_tokens(messages, [])
+    assert context.estimate([]) > before

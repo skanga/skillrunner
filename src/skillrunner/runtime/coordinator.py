@@ -119,6 +119,13 @@ a helper loses a required property such as transparency, fix the final file and 
 Command success or a validation summary alone is not proof.
 New files use
 overwrite=false and expected_sha256=null; replacements require the current read_text SHA-256 digest.
+model_capacity.max_output_tokens is an upper bound per response, including tool arguments.
+The actual allowance can be lower because of remaining run or context budgets. Keep each response
+within that bound. For large deliverables, write smaller complete source files or temporary chunks
+over separate turns, then assemble them with an already allowed command when appropriate.
+write_file replaces complete content; it has no append parameter. Do not install dependencies or
+use a new executable to assemble files. Validate the complete final artifact before registration
+and publication. If no permitted construction path exists, report the limitation honestly.
 A plain Markdown answer may be returned directly in finish_run.report without writing a file.
 In that case, report must contain the complete requested deliverable itself; a statement that the
 deliverable was created is not a substitute for its content.
@@ -471,6 +478,7 @@ class Coordinator:
             raise RunnerError(
                 "invalid_configuration", "Model capacities must be discovered or configured."
             )
+        self.context.set_response_capacity(self.profile.max_output_tokens)
         self.bundle.state["model"] = {
             "alias": (
                 settings.selected_model or settings.default_model

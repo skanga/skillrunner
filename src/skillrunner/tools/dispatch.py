@@ -14,6 +14,7 @@ from skillrunner.domain.errors import RunnerError
 from skillrunner.model.media import MediaAttachment
 from skillrunner.model.protocol import ModelToolCall
 from skillrunner.runtime.budgets import Deadline, UsageLedger
+from skillrunner.tools.schemas import WriteFileArgs
 
 ToolKind = Literal["action", "activation", "completion"]
 Handler = Callable[[Any], Awaitable[Any]]
@@ -267,6 +268,21 @@ class ToolRegistry:
                         "issues": [
                             {
                                 "type": item["type"],
+                                **(
+                                    {
+                                        "field": "expected_sha256",
+                                        "guidance": (
+                                            "Read the current file with read_text and copy its "
+                                            "full SHA-256 into expected_sha256. Use overwrite=true "
+                                            "only for intentional replacement."
+                                        ),
+                                    }
+                                    if not executed
+                                    and tool is not None
+                                    and tool.args_model is WriteFileArgs
+                                    and item["type"] == "overwrite_digest_required"
+                                    else {}
+                                ),
                                 **(
                                     {"field": item["loc"][0]}
                                     if item["loc"]

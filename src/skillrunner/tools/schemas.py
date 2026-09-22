@@ -3,6 +3,7 @@
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic_core import PydanticCustomError
 
 Nonempty = Annotated[str, Field(min_length=1)]
 Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
@@ -58,7 +59,9 @@ class WriteFileArgs(ToolArgs):
     @model_validator(mode="after")
     def require_overwrite_digest(self) -> "WriteFileArgs":
         if self.overwrite and self.expected_sha256 is None:
-            raise ValueError("Overwrite requires an expected digest.")
+            raise PydanticCustomError(
+                "overwrite_digest_required", "Overwrite requires an expected digest."
+            )
         return self
 
 
