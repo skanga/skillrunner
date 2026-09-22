@@ -28,8 +28,13 @@ class RunContext:
         self._prompt = prompt
         self._catalog = copy.deepcopy(catalog)
         self._inputs = copy.deepcopy(input_inventory or [])
+        self._model_capacity: dict[str, int] = {}
         self._active: dict[str, dict[str, str]] = {}
         self._history: list[dict[str, Any] | tuple[MediaAttachment, ...]] = []
+
+    def set_response_capacity(self, max_output_tokens: int) -> None:
+        """Set the resolved profile cap before activation and request admission."""
+        self._model_capacity = {"max_output_tokens": max_output_tokens}
 
     def activate(self, name: str, instructions: str, package_root: str) -> None:
         """Caller performs snapshot/capacity admission before committing activation."""
@@ -89,6 +94,7 @@ class RunContext:
                         "catalog": self._catalog,
                         "active_skills": list(self._active.values()),
                         "input_inventory": self._inputs,
+                        "model_capacity": self._model_capacity,
                     }
                 ),
             },

@@ -1773,3 +1773,108 @@ async def test_activation_does_not_correct_misspelled_catalog_name(tmp_path):
     assert receipt["status"] == "no_matching_skill"
     manifest = json.loads(Path(receipt["manifest_path"]).read_text())
     assert not manifest["provenance"]["activated_skills"]
+
+
+@pytest.mark.parametrize("discovered", [False, True])
+async def test_resolved_response_cap_visible_before_first_request(tmp_path, discovered):
+    settings = fixture(tmp_path)
+    settings.models["test"].api_key_env = "PRIVATE_KEY"
+    settings.models["test"].auth_mode = "bearer"
+    if discovered:
+        settings.models["test"].max_output_tokens = None
+
+    class DiscoveringAdapter(Adapter):
+        async def discover_capabilities(self, deadline):
+            result = await super().discover_capabilities(deadline)
+            result.profile = self.profile.model_copy(update={"max_output_tokens": 2345})
+            return result
+
+    observed = []
+
+    def inspect(messages):
+        resources = json.loads(messages[2]["content"].split("\n", 1)[1])
+        assert resources["model_capacity"]["max_output_tokens"] == (2345 if discovered else 4000)
+        assert "PRIVATE-CREDENTIAL" not in json.dumps(messages)
+        assert "including tool arguments" in messages[0]["content"]
+        assert "Use precise prose." in json.dumps(messages)
+        observed.append(True)
+        return finish()
+
+    receipt = await api().run_task(
+        RunRequest(
+            prompt="Write an answer", invocation_directory=tmp_path, required_skills=["writer"]
+        ),
+        settings,
+        environ={"PRIVATE_KEY": "PRIVATE-CREDENTIAL"},
+        adapter_factory=lambda profile, key: (DiscoveringAdapter if discovered else Adapter)(
+            profile, [inspect]
+        ),
+    )
+    assert receipt["status"] == "succeeded", receipt["errors"]
+    assert observed == [True]
+
+
+async def test_smaller_writes_assembled_with_allowed_command_publish_validated_output(tmp_path):
+    import sys
+
+    executable = str(Path(sys.executable).resolve())
+    fixture(tmp_path)
+    config = tmp_path / "skillrun.toml"
+    config.write_text(
+        config.read_text() + "\n[policy]\nallowed_executables = [" + json.dumps(executable) + "]\n"
+    )
+    settings = resolve_settings(tmp_path, {}, {})
+
+    def assemble(messages):
+        capabilities = json.loads(
+            messages[0]["content"].split("Run capabilities and requirements:\n", 1)[1]
+        )
+        scratch = capabilities["generated_roots"]["scratch"]
+        return [
+            call(
+                "run_command",
+                {
+                    "executable": executable,
+                    "cwd": scratch,
+                    "argv": [
+                        "-c",
+                        (
+                            "from pathlib import Path; "
+                            "Path('report.md').write_text("
+                            "Path('part1.txt').read_text() + Path('part2.txt').read_text())"
+                        ),
+                    ],
+                },
+            )
+        ]
+
+    calls = [
+        [call("write_file", {"path": "scratch/part1.txt", "content": "# Report\n"})],
+        [call("write_file", {"path": "scratch/part2.txt", "content": "Complete deliverable.\n"})],
+        assemble,
+        artifact_calls()[1],
+        finish(),
+    ]
+    output = tmp_path / "published.md"
+    receipt = await api().run_task(
+        RunRequest(
+            prompt="Write a report",
+            invocation_directory=tmp_path,
+            required_skills=["writer"],
+            output=output,
+        ),
+        settings,
+        environ={},
+        adapter_factory=lambda profile, key: Adapter(profile, calls),
+    )
+    assert receipt["status"] == "succeeded", receipt["errors"]
+    assert output.read_text() == "# Report\nComplete deliverable.\n"
+    manifest = json.loads(Path(receipt["manifest_path"]).read_text())
+    assert manifest["outputs"]["artifacts"][0]["status"] == "validated"
+    events = [
+        json.loads(line)
+        for line in (Path(receipt["manifest_path"]).parent / "events.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    assert not [event for event in events if event["event_type"] == "tool_failed"]
