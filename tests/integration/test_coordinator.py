@@ -164,6 +164,14 @@ async def test_command_schema_names_exact_generated_output_roots(tmp_path):
     assert str(root / "work/scratch") in description
     assert str(root / "artifacts") in description
     assert str(root / "work/artifacts") not in description
+    argv_description = schema["properties"]["argv"]["description"]
+    assert "Arguments after the executable, one array item per OS argument." in argv_description
+    assert "Do not repeat the executable in argv" in argv_description
+    assert "does not split strings or evaluate shell syntax" in argv_description
+    assert '["-c", "print(1)"]' in argv_description
+    assert 'already allowlisted shell and pass ["-c", "command text"]' in argv_description
+    assert str(root / "work/scratch") in argv_description
+    assert str(root / "artifacts") in argv_description
 
 
 async def test_blank_text_completion_without_an_artifact_is_not_success(tmp_path):

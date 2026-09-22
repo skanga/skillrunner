@@ -837,6 +837,11 @@ class Coordinator:
             "before artifacts."
         )
         command_schema["properties"]["argv"]["description"] = (
+            "Arguments after the executable, one array item per OS argument. Do not repeat "
+            "the executable in argv or put a whole command line in one item. The runner does "
+            "not split strings or evaluate shell syntax. For a Python code string, pass "
+            '["-c", "print(1)"]; for shell syntax, explicitly select an already allowlisted '
+            'shell and pass ["-c", "command text"]. '
             f"Use OS paths. Write command outputs under {artifact_root} or {scratch_root}; "
             "file-tool paths such as artifacts/file.txt are not OS paths."
         )
