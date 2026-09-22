@@ -87,7 +87,7 @@ Short aliases are case-sensitive. Repeated input and skill options accumulate in
 | `--max-steps` | Model-turn limit; default `40` |
 | `--max-tool-calls` | Aggregate tool-call limit; default `100` |
 | `--max-tokens` | Aggregate input/output token budget; default `100000` |
-| `--model-transport-retries` | Retries for transient read-only model transport failures; default `1` |
+| `--model-transport-retries` | Shared retries for transient model transport failures and empty terminal completions; default `1` |
 | `--shutdown-grace` | Child shutdown grace; default `5s` |
 | `--overwrite` | Allow replacing the explicitly requested primary output |
 | `-j, --json` | One terminal JSON receipt on stdout |
@@ -95,6 +95,8 @@ Short aliases are case-sensitive. Repeated input and skill options accumulate in
 | `-h, --help` | Usage and examples without starting a run |
 
 Durations require `ms`, `s`, `m`, or `h`, for example `500ms`, `1.5m`, or `1h`. TOML durations must be strings. Only shutdown grace permits zero (`0s`). Integer limits must be positive. Cleanup and final reporting can extend beyond the execution deadline.
+
+An empty assistant completion (`finish_reason="stop"`, blank or null content, and no tool calls) is recorded as a protocol error and may use the same retry allowance as HTTP 429/5xx and connection failures. Each attempt is separately charged within existing budgets; zero retries disables recovery. Other protocol errors and output-length stops are not retried, and dispatched tools are never replayed automatically.
 
 Storage limits are configured in `[storage]`. Defaults permit 10,000 input files totaling 1 GiB, 20,000 activated-package files totaling 512 MiB, 2 GiB of artifacts, and 4 GiB of scratch data. Tool output is bounded at 1 MiB, event logs at 10 MiB, individual reads at 64 KiB, and expanded archives at 256 MiB. Exceeding a limit produces an explicit failure; required input and instructions are not silently omitted. MCP tool results share the tool-output and execution budgets.
 
