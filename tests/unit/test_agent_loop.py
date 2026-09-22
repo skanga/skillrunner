@@ -401,11 +401,12 @@ async def test_empty_retry_cannot_exceed_budget(limit):
 
 async def test_empty_retry_respects_deadline(monkeypatch):
     loop, adapter, _, ledger = setup([empty_completion_error(), reply()])
-    loop.deadline = Deadline(0.02)
-    original_sleep = asyncio.sleep
+    now = [asyncio.get_running_loop().time()]
+    loop.deadline = Deadline(5, clock=lambda: now[0])
 
     async def expire_deadline(delay):
-        await original_sleep(0.04)
+        if delay > 0:
+            now[0] += 6.0
 
     monkeypatch.setattr(api().asyncio, "sleep", expire_deadline)
     with pytest.raises(RunnerError, match="budget_exhausted"):
