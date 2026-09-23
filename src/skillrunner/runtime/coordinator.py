@@ -811,6 +811,15 @@ class Coordinator:
             assert self.registry is not None
             values = args.model_dump()
             _, path, _ = self.files._resolve(values.pop("path"))
+            if self.settings.acceptance.checks and values["role"] == "primary":
+                existing = next((r for r in self.registry.records if r.role == "primary"), None)
+                if existing is not None:
+                    raise RunnerError(
+                        "artifact_invalid",
+                        "A primary artifact is already registered. Repair its file and reuse "
+                        "its artifact ID; register additional outputs as secondary.",
+                        details={"primary_artifact_id": existing.id, "path": str(existing.path)},
+                    )
             record = self.registry.register(path, **values)
             self.record_artifact_registration(record)
             return asdict(record)
@@ -1011,7 +1020,13 @@ class Coordinator:
                 "acceptance_failed" if exhausted else "acceptance_rejected",
                 "Task acceptance checks failed; repair allowance exhausted."
                 if exhausted
-                else "Task checks failed. Correct the candidate and propose completion again.",
+                else (
+                    "Task checks failed. Repair the file already registered as primary, keep "
+                    "its artifact ID, and propose completion again. "
+                    "Do not register another primary."
+                    if primary is not None
+                    else "Task checks failed. Correct the report and propose completion again."
+                ),
                 details={
                     "checks": result["checks"],
                     "repairs_remaining": max(

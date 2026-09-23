@@ -2043,8 +2043,9 @@ async def test_acceptance_checks_reject_success_allow_bounded_repair(
 
 
 @pytest.mark.parametrize("change_after_acceptance", [False, True])
+@pytest.mark.parametrize("try_second_primary", [False, True])
 async def test_acceptance_artifact_repair_and_final_digest(
-    tmp_path, monkeypatch, change_after_acceptance
+    tmp_path, monkeypatch, change_after_acceptance, try_second_primary
 ):
     import hashlib
     import sys
@@ -2075,6 +2076,15 @@ async def test_acceptance_artifact_repair_and_final_digest(
 
     def repair(messages):
         assert json.loads(messages[-1]["content"])["error"]["code"] == "acceptance_rejected"
+        if try_second_primary:
+            return [call("write_file", {"path": "scratch/replacement.md", "content": "approved"})]
+        return repair_original(messages)
+
+    def reject_second_primary(messages):
+        assert json.loads(messages[-1]["content"])["error"]["code"] == "artifact_invalid"
+        return repair_original(messages)
+
+    def repair_original(messages):
         return [
             call(
                 "write_file",
@@ -2107,6 +2117,24 @@ async def test_acceptance_artifact_repair_and_final_digest(
             ],
             first_finish,
             repair,
+            *(
+                [
+                    [
+                        call(
+                            "register_artifact",
+                            {
+                                "path": "scratch/replacement.md",
+                                "format": "md",
+                                "role": "primary",
+                                "description": "Replacement",
+                            },
+                        )
+                    ],
+                    reject_second_primary,
+                ]
+                if try_second_primary
+                else []
+            ),
             final_finish,
         ],
     )

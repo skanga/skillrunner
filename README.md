@@ -225,7 +225,10 @@ directly, without shell evaluation. Checkers must inspect actual output and
 return useful bounded diagnostics; a model-written test summary is not evidence
 that tests ran. Provision checkers outside model-writable workspace roots.
 
-A rejected proposal returns findings to the model for correction. The default
+A rejected proposal returns findings to the model for correction. With acceptance
+checks configured, register one primary artifact and repair that file in place,
+reusing its artifact ID. A second primary registration is rejected before changing
+the registry; additional outputs can be registered as secondary. The default
 allows two repairs; another rejection ends the run with exit 6. These repairs
 use the existing run budgets and are distinct from transport retries. Passing
 checks bind to the final candidate digest: changing the primary bytes after

@@ -41,6 +41,7 @@ class SelectionAdapter:
 
     def __init__(self, adapter: QualificationAdapter) -> None:
         self.adapter = adapter
+        self.request_started = False
         self.decision_reached = False
         self.intercepted_tool_names: list[str] = []
 
@@ -54,6 +55,7 @@ class SelectionAdapter:
         output_limit: int,
         request_deadline: float,
     ) -> ModelReply:
+        self.request_started = True
         reply = await self.adapter.complete(messages, tool_schemas, output_limit, request_deadline)
         names = [call.name for call in reply.tool_calls]
         if any(name not in {"activate_skill", "finish_run"} for name in names):
@@ -244,7 +246,7 @@ async def run_selection_case(
         activated = [item["name"] for item in manifest["provenance"]["activated_skills"]]
     except (OSError, ValueError, KeyError, TypeError):
         evidence_error = "Could not read activated skills from the returned manifest."
-    adapter = adapters[-1] if adapters else None
+    adapter = next((item for item in reversed(adapters) if item.request_started), None)
     decision_reached = bool(adapter and adapter.decision_reached and evidence_error is None)
     result = {
         "case": case["id"],
