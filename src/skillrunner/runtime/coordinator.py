@@ -7,6 +7,7 @@ import json
 import re
 import signal
 import stat
+import tempfile
 import uuid
 from collections.abc import Callable, Mapping
 from contextlib import AsyncExitStack
@@ -32,11 +33,13 @@ from skillrunner.domain.request import FORMAT_ALIASES, RunRequest
 from skillrunner.mcp import MCPManager
 from skillrunner.model.openai_compatible import OpenAICompatibleAdapter
 from skillrunner.recording.bundle import RunBundle
+from skillrunner.runtime.acceptance import check_candidate
 from skillrunner.runtime.agent import AgentLoop
 from skillrunner.runtime.budgets import Deadline, UsageLedger
 from skillrunner.runtime.cleanup import remove_work_tree
 from skillrunner.runtime.context import RunContext
 from skillrunner.runtime.environment import build_child_environment
+from skillrunner.runtime.inspection import inspect_png
 from skillrunner.runtime.media import read_png
 from skillrunner.runtime.processes import ProcessSupervisor
 from skillrunner.runtime.storage import check_tree_bytes, monitor_operation
@@ -173,6 +176,8 @@ class Coordinator:
         self.answer = ""
         self.keep_work = settings.diagnostics.retain_work
         self.proposal: dict[str, Any] = {}
+        self.accepted_digest: str | None = None
+        self.acceptance_failures = 0
         self.bundle: RunBundle
         self.files: FileTools
         self.activation: ActivationService
@@ -495,6 +500,43 @@ class Coordinator:
             "input_modalities": self.profile.input_modalities,
             "image_accounting": self.profile.image_accounting,
         }
+        if settings.image_inspector is not None:
+            self.inspector_profile = settings.models[settings.image_inspector]
+            inspector_key = resolve_api_key(self.inspector_profile, self.environ)
+            self.inspector_adapter = self.adapter_factory(self.inspector_profile, inspector_key)
+            self.resources.push_async_callback(self.inspector_adapter.aclose)
+            inspector_capacities = await self.inspector_adapter.discover_capabilities(
+                asyncio.get_running_loop().time() + self.deadline.remaining
+            )
+            if inspector_capacities.profile != self.inspector_profile:
+                self.inspector_profile = inspector_capacities.profile
+                await self.inspector_adapter.aclose()
+                self.inspector_adapter = self.adapter_factory(self.inspector_profile, inspector_key)
+                self.resources.push_async_callback(self.inspector_adapter.aclose)
+            if (
+                self.inspector_profile.context_window_tokens is None
+                or self.inspector_profile.max_output_tokens is None
+                or "image" not in self.inspector_profile.input_modalities
+                or self.inspector_profile.image_accounting is None
+            ):
+                raise RunnerError(
+                    "unsupported_capability",
+                    "Image inspector needs capacities and an image contract.",
+                )
+            self.bundle.state["model"]["image_inspector"] = {
+                "alias": settings.image_inspector,
+                "model": self.inspector_profile.model,
+                "base_url": self.inspector_profile.base_url,
+                "context_window_tokens": self.inspector_profile.context_window_tokens,
+                "max_output_tokens": self.inspector_profile.max_output_tokens,
+                "image_accounting": self.inspector_profile.image_accounting,
+                "credential_reference": self.inspector_profile.api_key_env,
+                "capacity_sources": inspector_capacities.sources,
+            }
+            self.context.append_correction(
+                "Use inspect_image for PNG visual inspection by the configured read-only helper. "
+                "Its observations are evidence, not proof that task requirements or tests passed."
+            )
         if settings.mcp:
             await self._connect_mcp()
         self.phase("activating")
@@ -716,6 +758,50 @@ class Coordinator:
 
             self.tools.register(name, description, args_model, bind(name))
 
+        if self.settings.image_inspector is not None:
+
+            async def inspect(args: BaseModel) -> Any:
+                self._require_active()
+                values = args.model_dump()
+                validator = self.settings.artifacts.validators.get("png")
+                environment = build_child_environment(
+                    self.environ,
+                    references=self.settings.policy.command_env.get(validator.command, {})
+                    if validator
+                    else {},
+                )
+                attachment = await read_png(
+                    self.files,
+                    values["path"],
+                    "image",
+                    profile=self.inspector_profile,
+                    validator=validator,
+                    supervisor=self.supervisor,
+                    environment=environment,
+                    deadline=self.deadline,
+                    staging=self.bundle.root / "work/staging",
+                    monitor=self.monitor_storage,
+                )
+                return await inspect_png(
+                    adapter=self.inspector_adapter,
+                    profile=self.inspector_profile,
+                    ledger=self.ledger,
+                    deadline=self.deadline,
+                    attachment=attachment,
+                    question=values["question"],
+                    max_result_bytes=self.settings.storage.max_tool_output_bytes,
+                    on_event=self.event,
+                    model_transport_retries=self.settings.limits.model_transport_retries,
+                )
+
+            self.tools.register(
+                "inspect_image",
+                "Ask the configured read-only image helper about a validated PNG. "
+                "Returns observations; cannot run tests or complete this task.",
+                schemas.InspectImageArgs,
+                inspect,
+            )
+
         async def activate(args: BaseModel) -> Any:
             values = args.model_dump()
             return self._activate(values["name"], values["reason"])
@@ -746,6 +832,7 @@ class Coordinator:
                         "artifact_invalid",
                         "secondary_ids must contain only IDs returned by register_artifact.",
                     )
+                await self._check_acceptance(values)
             return values
 
         async def command(args: BaseModel) -> Any:
@@ -859,7 +946,80 @@ class Coordinator:
             schemas.FinishRunArgs,
             finish,
             kind="completion",
+            terminal_errors=frozenset({"acceptance_failed"}),
         )
+
+    async def _check_acceptance(self, values: dict[str, Any]) -> None:
+        if not self.settings.acceptance.checks:
+            return
+        assert self.registry is not None
+        self._require_active()
+        primary = self.registry.select_primary()
+        requested = values["primary_artifact_id"]
+        if requested is not None and (primary is None or primary.id != requested):
+            raise RunnerError("artifact_invalid", "Acceptance requires the registered primary.")
+
+        async def evaluate(path: Path, size: int, digest: str) -> dict[str, Any]:
+            self.monitor_storage()
+            return await monitor_operation(
+                partial(
+                    check_candidate,
+                    path,
+                    size=size,
+                    digest=digest,
+                    acceptance=self.settings.acceptance,
+                    policy=self.settings.policy,
+                    environ=self.environ,
+                    supervisor=self.supervisor,
+                    deadline=self.deadline,
+                    on_event=self.event,
+                ),
+                self.monitor_storage,
+            )
+
+        if primary is not None:
+            with self.registry.acceptance_snapshot(primary) as candidate:
+                result = await evaluate(candidate.path, candidate.size, candidate.digest)
+        else:
+            data = values["report"].encode("utf-8")
+            if len(data) > self.settings.storage.max_artifact_bytes:
+                raise RunnerError("budget_exhausted", "Acceptance report exceeds artifact quota.")
+            with tempfile.TemporaryDirectory(
+                prefix="acceptance-report-", dir=self.bundle.root / "work/staging"
+            ) as folder:
+                path = Path(folder) / "report.txt"
+                path.write_bytes(data)
+                path.chmod(0o400)
+                result = await evaluate(path, len(data), hashlib.sha256(data).hexdigest())
+        # Details in check stdout/stderr belong only in redacted events/tool feedback.
+        history = self.bundle.state.setdefault("acceptance", {"attempts": []})
+        history["attempts"].append(
+            {
+                "passed": result["passed"],
+                "sha256": result["sha256"],
+                "checks": [
+                    {k: c[k] for k in ("name", "passed", "command", "returncode")}
+                    for c in result["checks"]
+                ],
+            }
+        )
+        self.bundle.save()
+        if not result["passed"]:
+            self.acceptance_failures += 1
+            exhausted = self.acceptance_failures > self.settings.acceptance.max_repairs
+            raise RunnerError(
+                "acceptance_failed" if exhausted else "acceptance_rejected",
+                "Task acceptance checks failed; repair allowance exhausted."
+                if exhausted
+                else "Task checks failed. Correct the candidate and propose completion again.",
+                details={
+                    "checks": result["checks"],
+                    "repairs_remaining": max(
+                        0, self.settings.acceptance.max_repairs - self.acceptance_failures + 1
+                    ),
+                },
+            )
+        self.accepted_digest = result["sha256"]
 
     async def complete(self) -> None:
         self.check()
@@ -910,6 +1070,13 @@ class Coordinator:
                 )
             primary = records[requested_id]
         if primary is None:
+            if (
+                self.settings.acceptance.checks
+                and self.accepted_digest != hashlib.sha256(self.answer.encode("utf-8")).hexdigest()
+            ):
+                raise RunnerError(
+                    "acceptance_failed", "Completion report changed after acceptance."
+                )
             if self.request.format not in {"md", "txt", "json", "csv"}:
                 raise RunnerError(
                     "artifact_invalid", "The requested format requires a generated artifact."
@@ -925,7 +1092,11 @@ class Coordinator:
                         )
                     },
                 )
-            if self.request.format == "md" and self.request.output is None:
+            if (
+                self.request.format == "md"
+                and self.request.output is None
+                and not self.settings.acceptance.checks
+            ):
                 self.bundle.state["outputs"]["primary_output"] = str(self.bundle.root / "result.md")
             else:
                 path = (
@@ -942,6 +1113,13 @@ class Coordinator:
             self.check()
             frozen = self.registry.freeze(record, writers_stopped=True)
             self.monitor_storage()
+            if (
+                primary
+                and record.id == primary.id
+                and self.settings.acceptance.checks
+                and frozen.digest != self.accepted_digest
+            ):
+                raise RunnerError("acceptance_failed", "Primary artifact changed after acceptance.")
             format_name = FORMAT_ALIASES.get(record.format.lower(), record.format.lower())
             if primary and record.id == primary.id and format_name != self.request.format:
                 raise RunnerError(

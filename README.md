@@ -189,3 +189,46 @@ partial artifacts and the failure report, leaves an unpublished destination unch
 and neither dispatches returned tools nor retries that response. When the provider
 omits usage, returned public text and tool-call content (including truncated
 arguments) are charged using the documented UTF-8 estimate.
+
+
+### Optional image inspector and task acceptance checks
+
+A text-only executor can use a separate named image-capable profile through
+`image_inspector = "vision"` at the top level of the configuration. Define
+`[models.vision]` with the endpoint, model, credential environment reference,
+capacities, `input_modalities = ["text", "image"]`, and an explicitly supported
+`image_accounting` contract. The existing allowlisted PNG validator is still
+required. The `inspect_image` tool sends a validated PNG and a question to that
+profile, returning observations and image metadata to the executor. It cannot
+execute task commands or finish the parent run. Both models share the run's
+turn, token, tool-call and time limits; image bytes are omitted from logs.
+
+Optional task acceptance checks reject a success proposal when the configured
+command returns nonzero. For example, on a host with this checker installed:
+
+```toml
+[acceptance]
+max_repairs = 2
+
+[acceptance.checks.deliverable]
+command = "/opt/checkers/check-deliverable"
+args = ["{path}"]
+```
+
+The checker command must also be in `policy.allowed_executables`. Configure its
+environment through the existing `policy.command_env` references. `{path}` is
+replaced with the path of an isolated copy of the primary candidate, or the
+proposed text report when there is no primary artifact. With acceptance enabled,
+a checked text report is retained as a primary artifact; `result.md` remains the
+separate diagnostic report. Arguments are passed
+directly, without shell evaluation. Checkers must inspect actual output and
+return useful bounded diagnostics; a model-written test summary is not evidence
+that tests ran. Provision checkers outside model-writable workspace roots.
+
+A rejected proposal returns findings to the model for correction. The default
+allows two repairs; another rejection ends the run with exit 6. These repairs
+use the existing run budgets and are distinct from transport retries. Passing
+checks bind to the final candidate digest: changing the primary bytes after
+acceptance prevents publication. Format validation remains required. Checks
+prove only the requirements they actually test, not unrestricted semantic quality.
+Without acceptance checks or an image inspector, existing behavior is preserved.

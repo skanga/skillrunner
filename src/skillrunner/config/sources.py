@@ -191,7 +191,10 @@ def _resolve(cwd: Path, overrides: dict[str, Any], environ: Mapping[str, str]) -
     for server in settings.mcp.values():
         if server.command:
             server.command = _command(server.command, base, environ, cwd) or server.command
-    for validator in settings.artifacts.validators.values():
+    for validator in (
+        *settings.artifacts.validators.values(),
+        *settings.acceptance.checks.values(),
+    ):
         validator.command = _command(validator.command, base, environ, cwd) or validator.command
     defaults = FileSettings().model_dump()
     for key in _origins(defaults):
