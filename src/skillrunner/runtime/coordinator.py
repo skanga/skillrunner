@@ -535,6 +535,12 @@ class Coordinator:
             }
             self.context.append_correction(
                 "Use inspect_image for PNG visual inspection by the configured read-only helper. "
+                f"Each PNG must be at most {settings.storage.max_tool_output_bytes} bytes. "
+                "Before inspection, use existing allowed commands to check file size and, "
+                "if needed, create a smaller PNG preview. Preserve the requested dimensions "
+                "and quality of the original deliverable. For small text, inspect suitable "
+                "crops in separate calls within the same budgets. Previews do not establish "
+                "full-resolution correctness. Oversized images stop the run with exit 7. "
                 "Its observations are evidence, not proof that task requirements or tests passed."
             )
         if settings.mcp:
@@ -797,6 +803,9 @@ class Coordinator:
             self.tools.register(
                 "inspect_image",
                 "Ask the configured read-only image helper about a validated PNG. "
+                f"Maximum PNG file size: {self.settings.storage.max_tool_output_bytes} bytes. "
+                "Check file size first; use existing allowed commands to prepare a smaller "
+                "preview or crop if needed, preserving the original deliverable. "
                 "Returns observations; cannot run tests or complete this task.",
                 schemas.InspectImageArgs,
                 inspect,

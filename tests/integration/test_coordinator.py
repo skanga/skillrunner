@@ -1910,6 +1910,7 @@ log_content = true
 """
     )
     settings = resolve_settings(tmp_path, {}, {})
+    settings.storage.max_tool_output_bytes = 123456
     attachment = MediaAttachment(
         b"validated-private-image", "scratch/page.png", 10, 10, "gemma4-image-max-v1"
     )
@@ -1949,6 +1950,14 @@ log_content = true
         adapter_factory=factory,
     )
     assert receipt["exit_code"] == 0
+    executor = adapters["arbitrary"]
+    assert "123456 bytes" in json.dumps(executor.requests[0])
+    inspect_schema = next(
+        tool["function"]
+        for tool in executor.tool_schemas[0]
+        if tool["function"]["name"] == "inspect_image"
+    )
+    assert "123456 bytes" in inspect_schema["description"]
     assert all(a.closed for a in adapters.values())
     assert "data:image/png;base64," in json.dumps(adapters["vision"].requests)
     root = Path(receipt["manifest_path"]).parent
