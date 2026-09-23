@@ -48,20 +48,20 @@ def test_budget_keeps_prior_spending_and_reserves_before_request(tmp_path):
     assert len(json.loads(path.read_text())["requests"]) == 2
 
 
-def test_authorized_qualification_ceiling_accepts_35_but_rejects_more(tmp_path):
+def test_authorized_qualification_ceiling_accepts_200_but_rejects_more(tmp_path):
     path = tmp_path / "spending.json"
     seed(path)
     state = json.loads(path.read_text())
-    state["budget_usd"] = "35"
+    state["budget_usd"] = "200"
     path.write_text(json.dumps(state))
     with ledger_api().SpendingLedger(path) as ledger:
         ledger.require_authorized_ceiling()
         assert ledger.state["charged_usd"] == "0.0015080"
-    state["budget_usd"] = "35.01"
+    state["budget_usd"] = "200.01"
     path.write_text(json.dumps(state))
     with (
         ledger_api().SpendingLedger(path) as ledger,
-        pytest.raises(ValueError, match=r"authorized \$35 ceiling"),
+        pytest.raises(ValueError, match=r"authorized \$200 ceiling"),
     ):
         ledger.require_authorized_ceiling()
     assert json.loads(path.read_text())["charged_usd"] == "0.0015080"
