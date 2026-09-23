@@ -8,9 +8,10 @@ subsequent use must verify the recorded digest, as retention does here.
 import hashlib
 import os
 import stat
+import tempfile
 import uuid
-from collections.abc import Callable, Iterable
-from contextlib import suppress
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
@@ -166,6 +167,18 @@ class ArtifactRegistry:
                 details={"artifact_ids": [item.id for item in primaries]},
             )
         return primaries[0] if primaries else None
+
+    @contextmanager
+    def acceptance_snapshot(self, record: ArtifactRecord) -> Iterator[FrozenArtifact]:
+        """Copy for a check without sealing the final candidate against repairs."""
+        self.check()
+        if self._records.get(record.id) is not record:
+            raise RunnerError("artifact_invalid", "Unknown acceptance candidate.")
+        source = self._generated(record.path)
+        with tempfile.TemporaryDirectory(prefix="acceptance-", dir=self.staging_root) as folder:
+            destination = Path(folder) / "candidate"
+            size, digest = self._copy(source, destination)
+            yield FrozenArtifact(record, destination, size, digest)
 
     def freeze(self, record: ArtifactRecord, *, writers_stopped: bool) -> FrozenArtifact:
         self.check()

@@ -42,6 +42,11 @@ class ReadMediaArgs(ToolArgs):
     representation: Nonempty
 
 
+class InspectImageArgs(ToolArgs):
+    path: Nonempty
+    question: Nonempty
+
+
 class WriteFileArgs(ToolArgs):
     path: Nonempty
     content: str

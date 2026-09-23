@@ -173,6 +173,11 @@ class Artifacts(StrictModel):
     validators: dict[str, ExternalValidator] = Field(default_factory=dict)
 
 
+class Acceptance(StrictModel):
+    checks: dict[str, ExternalValidator] = Field(default_factory=dict)
+    max_repairs: NonnegativeInt = 2
+
+
 class Diagnostics(StrictModel):
     log_content: bool = False
     retain_work: bool = False
@@ -184,6 +189,7 @@ class FileSettings(StrictModel):
     skills_dir: str | Path = "skills"
     output_dir: str | Path = "outputs"
     default_model: str | None = None
+    image_inspector: Annotated[str, Field(min_length=1)] | None = None
     models: dict[str, ModelProfile] = Field(default_factory=dict)
     direct_model: DirectModel = Field(default_factory=DirectModel)
     limits: RunLimits = Field(default_factory=RunLimits)
@@ -191,7 +197,14 @@ class FileSettings(StrictModel):
     policy: Policy = Field(default_factory=Policy)
     mcp: dict[str, MCPConfig] = Field(default_factory=dict)
     artifacts: Artifacts = Field(default_factory=Artifacts)
+    acceptance: Acceptance = Field(default_factory=Acceptance)
     diagnostics: Diagnostics = Field(default_factory=Diagnostics)
+
+    @model_validator(mode="after")
+    def inspector_alias(self) -> "FileSettings":
+        if self.image_inspector is not None and self.image_inspector not in self.models:
+            raise ValueError("image_inspector must name a configured model profile")
+        return self
 
     @field_validator("schema_version", mode="before")
     @classmethod

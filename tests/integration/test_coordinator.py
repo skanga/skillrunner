@@ -1886,3 +1886,323 @@ async def test_smaller_writes_assembled_with_allowed_command_publish_validated_o
         .splitlines()
     ]
     assert not [event for event in events if event["event_type"] == "tool_failed"]
+
+
+async def test_named_image_inspector_keeps_png_out_of_executor_context(tmp_path, monkeypatch):
+    from skillrunner.model.media import MediaAttachment
+
+    fixture(tmp_path)
+    config = tmp_path / "skillrun.toml"
+    config.write_text(
+        'image_inspector = "vision"\n'
+        + config.read_text()
+        + """
+[models.vision]
+base_url = "http://vision.invalid/v1"
+model = "vision"
+api_key_env = "VISION_KEY"
+context_window_tokens = 16000
+max_output_tokens = 1000
+input_modalities = ["text", "image"]
+image_accounting = "gemma4-image-max-v1"
+[diagnostics]
+log_content = true
+"""
+    )
+    settings = resolve_settings(tmp_path, {}, {})
+    attachment = MediaAttachment(
+        b"validated-private-image", "scratch/page.png", 10, 10, "gemma4-image-max-v1"
+    )
+
+    async def validated_read(*args, **kwargs):
+        assert kwargs["profile"].model == "vision"
+        return attachment
+
+    monkeypatch.setattr(api(), "read_png", validated_read)
+    adapters = {}
+
+    def checked_finish(messages):
+        assert "data:image/png;base64," not in json.dumps(messages)
+        result = json.loads(messages[-1]["content"])
+        assert result["value"]["report"] == "Title visible."
+        return finish()
+
+    def factory(profile, key):
+        if profile.model == "vision":
+            assert key.get_secret_value() == "private-vision-key"
+            replies = [[call("finish_run", {"report": "Title visible."})]]
+        else:
+            replies = [
+                [call("inspect_image", {"path": "scratch/page.png", "question": "Read title"})],
+                checked_finish,
+            ]
+        adapter = Adapter(profile, replies)
+        adapters[profile.model] = adapter
+        return adapter
+
+    receipt = await api().run_task(
+        RunRequest(
+            prompt="Inspect title", invocation_directory=tmp_path, required_skills=["writer"]
+        ),
+        settings,
+        environ={"VISION_KEY": "private-vision-key"},
+        adapter_factory=factory,
+    )
+    assert receipt["exit_code"] == 0
+    assert all(a.closed for a in adapters.values())
+    assert "data:image/png;base64," in json.dumps(adapters["vision"].requests)
+    root = Path(receipt["manifest_path"]).parent
+    manifest = json.loads((root / "run.json").read_text())
+    assert manifest["model"]["image_inspector"]["model"] == "vision"
+    logs = (root / "events.jsonl").read_text()
+    assert "private-vision-key" not in logs and "data:image/png;base64," not in logs
+    assert "image_inspector" in logs
+
+
+def test_image_inspector_alias_must_exist(tmp_path):
+    fixture(tmp_path)
+    config = tmp_path / "skillrun.toml"
+    config.write_text('image_inspector = "absent"\n' + config.read_text())
+    from skillrunner.domain.errors import RunnerError
+
+    with pytest.raises(RunnerError):
+        resolve_settings(tmp_path, {}, {})
+
+
+@pytest.mark.parametrize("repair", [True, False])
+@pytest.mark.parametrize("redact_report", [False, True])
+async def test_acceptance_checks_reject_success_allow_bounded_repair(
+    tmp_path, repair, redact_report
+):
+    import sys
+
+    fixture(tmp_path)
+    config = tmp_path / "skillrun.toml"
+    checker = (
+        "import pathlib,sys; v=pathlib.Path(sys.argv[1]).read_text(); "
+        "print('Expected approved content'); sys.exit(0 if v == 'approved' else 1)"
+    )
+    config.write_text(
+        config.read_text()
+        + "\n[policy]\nallowed_executables = ["
+        + json.dumps(sys.executable)
+        + "]\n[acceptance]\nmax_repairs = 1\n"
+        + "[acceptance.checks.content]\ncommand = "
+        + json.dumps(sys.executable)
+        + '\nargs = ["-c", '
+        + json.dumps(checker)
+        + ', "{path}"]\n'
+    )
+    if redact_report:
+        config.write_text(config.read_text() + '\n[diagnostics]\nredact_env = ["TASK_SECRET"]\n')
+    environment = {"TASK_SECRET": "approved"} if redact_report else {}
+    settings = resolve_settings(tmp_path, {}, environment)
+
+    def after_rejection(messages):
+        result = json.loads(messages[-1]["content"])
+        assert not result["ok"]
+        assert result["error"]["code"] == "acceptance_rejected"
+        assert "Expected approved content" in json.dumps(result)
+        return [
+            call(
+                "finish_run",
+                {"outcome": "succeeded", "report": "approved" if repair else "bad"},
+                "retry",
+            )
+        ]
+
+    adapter = Adapter(settings.models["test"], [])
+    adapter.calls = iter(
+        [[call("finish_run", {"outcome": "succeeded", "report": "bad"})], after_rejection]
+    )
+    receipt = await api().run_task(
+        RunRequest(
+            prompt="Return approved", invocation_directory=tmp_path, required_skills=["writer"]
+        ),
+        settings,
+        environ=environment,
+        adapter_factory=lambda profile, key: adapter,
+    )
+    assert receipt["exit_code"] == (0 if repair else 6)
+    if not repair:
+        assert receipt["errors"][0]["code"] == "acceptance_failed"
+    manifest = json.loads(Path(receipt["manifest_path"]).read_text())
+    assert len(manifest["acceptance"]["attempts"]) == 2
+    assert manifest["acceptance"]["attempts"][-1]["passed"] is repair
+    if repair:
+        import hashlib
+
+        published = Path(receipt["primary_output"]).read_bytes()
+        assert published == b"approved"
+        if redact_report:
+            assert "[REDACTED]" in Path(receipt["report_path"]).read_text()
+        assert (
+            hashlib.sha256(published).hexdigest()
+            == manifest["acceptance"]["attempts"][-1]["sha256"]
+        )
+
+
+@pytest.mark.parametrize("change_after_acceptance", [False, True])
+async def test_acceptance_artifact_repair_and_final_digest(
+    tmp_path, monkeypatch, change_after_acceptance
+):
+    import hashlib
+    import sys
+
+    fixture(tmp_path)
+    config = tmp_path / "skillrun.toml"
+    checker = (
+        "import pathlib,sys; "
+        "sys.exit(0 if pathlib.Path(sys.argv[1]).read_text() == 'approved' else 1)"
+    )
+    config.write_text(
+        config.read_text()
+        + "\n[policy]\nallowed_executables = ["
+        + json.dumps(sys.executable)
+        + "]\n[acceptance.checks.content]\ncommand = "
+        + json.dumps(sys.executable)
+        + '\nargs = ["-c", '
+        + json.dumps(checker)
+        + ', "{path}"]\n'
+    )
+    settings = resolve_settings(tmp_path, {}, {})
+    identifier = None
+
+    def first_finish(messages):
+        nonlocal identifier
+        identifier = json.loads(messages[-1]["content"])["value"]["id"]
+        return finish(primary_artifact_id=identifier)
+
+    def repair(messages):
+        assert json.loads(messages[-1]["content"])["error"]["code"] == "acceptance_rejected"
+        return [
+            call(
+                "write_file",
+                {
+                    "path": "scratch/result.md",
+                    "content": "approved",
+                    "overwrite": True,
+                    "expected_sha256": hashlib.sha256(b"bad").hexdigest(),
+                },
+            )
+        ]
+
+    def final_finish(messages):
+        return finish(primary_artifact_id=identifier)
+
+    adapter = Adapter(
+        settings.models["test"],
+        [
+            [call("write_file", {"path": "scratch/result.md", "content": "bad"})],
+            [
+                call(
+                    "register_artifact",
+                    {
+                        "path": "scratch/result.md",
+                        "format": "md",
+                        "role": "primary",
+                        "description": "Result",
+                    },
+                )
+            ],
+            first_finish,
+            repair,
+            final_finish,
+        ],
+    )
+    if change_after_acceptance:
+        original = api().Coordinator.complete
+
+        async def changed(self):
+            self.registry.records[0].path.write_text("different")
+            await original(self)
+
+        monkeypatch.setattr(api().Coordinator, "complete", changed)
+    output = tmp_path / "published.md"
+    receipt = await api().run_task(
+        RunRequest(
+            prompt="Write approved",
+            invocation_directory=tmp_path,
+            required_skills=["writer"],
+            output=output,
+        ),
+        settings,
+        environ={},
+        adapter_factory=lambda profile, key: adapter,
+    )
+    if change_after_acceptance:
+        assert receipt["exit_code"] == 6
+        assert receipt["errors"][0]["code"] == "acceptance_failed"
+        assert not output.exists()
+    else:
+        assert receipt["exit_code"] == 0
+        assert output.read_text() == "approved"
+
+
+async def test_acceptance_timeout_cannot_finish_success_and_cleans_up(tmp_path):
+    import sys
+
+    fixture(tmp_path)
+    config = tmp_path / "skillrun.toml"
+    checker = "import time; time.sleep(60)"
+    config.write_text(
+        config.read_text()
+        + "\n[policy]\nallowed_executables = ["
+        + json.dumps(sys.executable)
+        + "]\n[acceptance.checks.slow]\ncommand = "
+        + json.dumps(sys.executable)
+        + '\nargs = ["-c", '
+        + json.dumps(checker)
+        + ', "{path}"]\n'
+    )
+    settings = resolve_settings(tmp_path, {"timeout": "1s"}, {})
+    adapter = Adapter(settings.models["test"], [finish()])
+    receipt = await api().run_task(
+        RunRequest(
+            prompt="Return a report", invocation_directory=tmp_path, required_skills=["writer"]
+        ),
+        settings,
+        environ={},
+        adapter_factory=lambda profile, key: adapter,
+    )
+    assert receipt["exit_code"] == 7
+    root = Path(receipt["manifest_path"]).parent
+    events = [json.loads(line) for line in (root / "events.jsonl").read_text().splitlines()]
+    assert any(e["event_type"] == "process_stopped" for e in events)
+    assert not any(
+        e["event_type"] == "acceptance_check_completed" and e["payload"]["passed"] for e in events
+    )
+    assert not list(root.glob("work/staging/acceptance-*"))
+    assert adapter.closed
+
+
+async def test_acceptance_checker_storage_is_checked_before_snapshot_cleanup(tmp_path):
+    import sys
+
+    fixture(tmp_path)
+    config = tmp_path / "skillrun.toml"
+    checker = "import pathlib; pathlib.Path('excess').write_bytes(b'x' * 2000000)"
+    config.write_text(
+        config.read_text()
+        + "\n[policy]\nallowed_executables = ["
+        + json.dumps(sys.executable)
+        + "]\n[storage]\nmax_scratch_bytes = 1000000\n"
+        + "[acceptance.checks.storage]\ncommand = "
+        + json.dumps(sys.executable)
+        + '\nargs = ["-c", '
+        + json.dumps(checker)
+        + ', "{path}"]\n'
+    )
+    settings = resolve_settings(tmp_path, {}, {})
+    adapter = Adapter(settings.models["test"], [finish()])
+    receipt = await api().run_task(
+        RunRequest(
+            prompt="Return a report", invocation_directory=tmp_path, required_skills=["writer"]
+        ),
+        settings,
+        environ={},
+        adapter_factory=lambda profile, key: adapter,
+    )
+    assert receipt["exit_code"] == 7
+    assert receipt["errors"][0]["code"] == "budget_exhausted"
+    assert adapter.closed
