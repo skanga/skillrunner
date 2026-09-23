@@ -202,6 +202,10 @@ required. The `inspect_image` tool sends a validated PNG and a question to that
 profile, returning observations and image metadata to the executor. It cannot
 execute task commands or finish the parent run. Both models share the run's
 turn, token, tool-call and time limits; image bytes are omitted from logs.
+The executor receives the configured `storage.max_tool_output_bytes` PNG limit.
+It can use allowed commands to prepare a smaller preview or crop for inspection
+while preserving the original deliverable. The runner does not resize images;
+an oversized inspection request still stops with exit 7.
 
 Optional task acceptance checks reject a success proposal when the configured
 command returns nonzero. For example, on a host with this checker installed:
