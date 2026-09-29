@@ -48,20 +48,20 @@ def test_budget_keeps_prior_spending_and_reserves_before_request(tmp_path):
     assert len(json.loads(path.read_text())["requests"]) == 2
 
 
-def test_authorized_qualification_ceiling_accepts_200_but_rejects_more(tmp_path):
+def test_authorized_qualification_ceiling_accepts_225_but_rejects_more(tmp_path):
     path = tmp_path / "spending.json"
     seed(path)
     state = json.loads(path.read_text())
-    state["budget_usd"] = "200"
+    state["budget_usd"] = "225"
     path.write_text(json.dumps(state))
     with ledger_api().SpendingLedger(path) as ledger:
         ledger.require_authorized_ceiling()
         assert ledger.state["charged_usd"] == "0.0015080"
-    state["budget_usd"] = "200.01"
+    state["budget_usd"] = "225.01"
     path.write_text(json.dumps(state))
     with (
         ledger_api().SpendingLedger(path) as ledger,
-        pytest.raises(ValueError, match=r"authorized \$200 ceiling"),
+        pytest.raises(ValueError, match=r"authorized \$225 ceiling"),
     ):
         ledger.require_authorized_ceiling()
     assert json.loads(path.read_text())["charged_usd"] == "0.0015080"
@@ -272,3 +272,22 @@ def test_undurable_reservation_fails_before_admission(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "atomic_write", lambda path, content: False)
     with module.SpendingLedger(path) as ledger, pytest.raises(OSError, match="durability"):
         ledger.reserve("test", Decimal("1"))
+
+
+def test_reservation_at_225_preserves_history_and_refuses_next_cent(tmp_path):
+    path = tmp_path / "spending.json"
+    seed(path)
+    state = json.loads(path.read_text())
+    state["budget_usd"] = "225"
+    path.write_text(json.dumps(state))
+    previous_requests = state["requests"].copy()
+    with ledger_api().SpendingLedger(path) as ledger:
+        ledger.require_authorized_ceiling()
+        ledger.reserve("test", Decimal("225") - Decimal(state["charged_usd"]))
+        assert ledger.state["charged_usd"] == "225.0000000"
+        with pytest.raises(ValueError, match="ceiling"):
+            ledger.reserve("test", Decimal("0.01"))
+    final = json.loads(path.read_text())
+    assert final["requests"][:-1] == previous_requests
+    assert len(final["requests"]) == 2
+    assert Decimal(final["charged_usd"]) == Decimal("225")

@@ -10,7 +10,7 @@ from typing import Any, Self
 
 from skillrunner.recording.bundle import atomic_write
 
-AUTHORIZED_BUDGET_USD = Decimal("200")
+AUTHORIZED_BUDGET_USD = Decimal("225")
 
 
 def amount(value: str | Decimal) -> Decimal:
@@ -60,7 +60,7 @@ class SpendingLedger:
         if not self.open:
             raise ValueError("Open the spending ledger before checking its ceiling")
         if amount(self.state["budget_usd"]) > AUTHORIZED_BUDGET_USD:
-            raise ValueError("Ledger exceeds the user-authorized $200 ceiling")
+            raise ValueError("Ledger exceeds the user-authorized $225 ceiling")
 
     def _save(self) -> None:
         durable = atomic_write(
