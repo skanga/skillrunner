@@ -694,3 +694,66 @@ async def test_wrong_command_directory_can_recover_using_reported_workspace_root
     assert json.loads(Path(receipt["primary_output"]).read_text()) == {"recovered": True}
     assert not wrong_directory.exists()
     assert manifest_for(receipt)["lifecycle"]["cleanup"]["owned_pids_remaining"] == []
+
+
+async def test_aggregate_token_exhaustion_finalizes_partial_artifact_and_cleanup(tmp_path):
+    from skillrunner.model.protocol import ModelReply, ModelUsage
+
+    settings = fixture(tmp_path)
+    settings.limits.max_tokens = 100_000
+    publication = tmp_path / "published.json"
+
+    class MeteredAdapter(Adapter):
+        async def complete(self, messages, tool_schemas, output_limit, request_deadline):
+            reply = await super().complete(messages, tool_schemas, output_limit, request_deadline)
+            # Two individually admissible turns consume the cumulative allowance.
+            usage = ModelUsage(49_970, 30, 50_000)
+            return ModelReply(reply.public_text, reply.tool_calls, reply.finish_reason, usage, None)
+
+    adapter = MeteredAdapter(
+        settings.models["test"],
+        [
+            [call("write_file", {"path": "scratch/partial.json", "content": '{"partial":true}'})],
+            [
+                call(
+                    "register_artifact",
+                    {
+                        "path": "scratch/partial.json",
+                        "format": "json",
+                        "role": "primary",
+                        "description": "Partial result",
+                    },
+                )
+            ],
+            finish(),
+        ],
+    )
+    receipt = await run_task(
+        RunRequest(
+            prompt="Write JSON",
+            invocation_directory=tmp_path,
+            required_skills=["writer"],
+            output=publication,
+            format="json",
+        ),
+        settings,
+        environ={},
+        adapter_factory=lambda profile, key: adapter,
+    )
+    assert receipt["status"] == "limit_exceeded" and receipt["exit_code"] == 7
+    assert receipt["errors"][0]["code"] == "budget_exhausted"
+    assert "Aggregate token budget" in Path(receipt["report_path"]).read_text()
+    assert len(adapter.requests) == 2 and adapter.closed
+    assert receipt["primary_output"] is None
+    assert not publication.exists()
+    manifest = manifest_for(receipt)
+    assert manifest["lifecycle"]["status"] == "limit_exceeded"
+    assert manifest["lifecycle"]["exit_code"] == 7
+    assert manifest["lifecycle"]["cleanup"] == {"work_retained": False, "owned_pids_remaining": []}
+    assert manifest["usage"]["charged_tokens"] == 100_000
+    assert manifest["usage"]["model_attempts"] == 2
+    (artifact,) = manifest["outputs"]["artifacts"]
+    assert artifact["status"] == "incomplete"
+    assert json.loads(Path(artifact["path"]).read_text()) == {"partial": True}
+    assert artifact["path"] in receipt["artifact_paths"]
+    assert not (Path(receipt["manifest_path"]).parent / "work").exists()
