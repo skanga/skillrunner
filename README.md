@@ -2,7 +2,9 @@
 
 Skill Runner runs one task using local Agent Skills packages, writes the results and an execution report, then exits. It selects relevant skills from their descriptions. `--skill` requires named skills while still allowing additional skills when needed.
 
-The qualified candidate (`0fb4ba6`) passed the approved release gates: 51 of 63 task trials (80.95%, including all failures and an independent grading correction) and 21 of 22 automatic-selection cases (95.45%, with one false activation). The task trials used a pinned GPT-5.5 executor with a Gemma image-inspection helper; these results do not guarantee the same quality from every compatible model.
+The reference candidate (`0fb4ba6`) met the empirical qualification thresholds: 51 of 63 task trials (80.95%, including all failures and an independent grading correction) and 21 of 22 automatic-selection cases (95.45%, with one false activation). The task trials used a pinned GPT-5.5 executor with a Gemma image-inspection helper; these results do not guarantee the same quality from every compatible model.
+
+The full PRD completion audit remains open for runtime-version provenance and precise endpoint-capability diagnostics.
 
 Native CI passed on Linux, macOS, and Windows with Python 3.13 and 3.14. A separate Windows job passed the no-usable-POSIX-shell checks on identical product code. Tool-calling and artifact-output conformance passed against two distinct OpenAI-compatible endpoint implementations. See the [native CI run](https://github.com/skanga/skillrunner/actions/runs/36650728357) and [Windows shell qualification](https://github.com/skanga/skillrunner/actions/runs/36653125690).
 
