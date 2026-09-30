@@ -15,7 +15,7 @@ import pytest
 from skillrunner.config.models import Policy
 from skillrunner.domain.errors import RunnerError
 from skillrunner.runtime.budgets import Deadline
-from skillrunner.runtime.environment import ChildEnvironment
+from skillrunner.runtime.environment import ChildEnvironment, build_child_environment
 
 
 def supervisor(**kwargs):
@@ -647,7 +647,7 @@ async def test_runtime_version_actual_python_once_and_denied_never_probed(tmp_pa
             environment=ChildEnvironment({}, {}),
             deadline=Deadline(5),
         )
-        assert result.stdout == b"task\n"
+        assert result.stdout.splitlines() == [b"task"]
     observed = [payload for name, payload in events if name == "runtime_provenance_outcome"]
     assert len(observed) == 1
     assert observed[0]["version"] == platform.python_version()
@@ -821,9 +821,10 @@ async def test_runtime_actual_node_if_installed(tmp_path):
         executable,
         ["-p", "process.versions.node"],
         cwd=tmp_path,
-        environment=ChildEnvironment({}, {}),
+        environment=build_child_environment(os.environ, references={}),
         deadline=Deadline(5),
     )
+    assert records[-1][1]["outcome"] == "detected"
     assert records[-1][1]["version"] == result.stdout.decode().strip()
     assert records[-1][1]["family"] == "node"
 

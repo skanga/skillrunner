@@ -6,7 +6,7 @@ The reference candidate (`0fb4ba6`) met the empirical qualification thresholds: 
 
 Subsequent completion fixes add runtime-version provenance and precise endpoint-capability diagnostics. The empirical scores above remain measurements of `0fb4ba6`; no new paid qualification was performed for these fixes. Version probes add bounded process time and can stop a run if its deadline expires.
 
-Native CI passed on Linux, macOS, and Windows with Python 3.13 and 3.14. A separate Windows job passed the no-usable-POSIX-shell checks on identical product code. Tool-calling and artifact-output conformance passed against two distinct OpenAI-compatible endpoint implementations. See the [native CI run](https://github.com/skanga/skillrunner/actions/runs/36650728357) and [Windows shell qualification](https://github.com/skanga/skillrunner/actions/runs/36653125690).
+For reference candidate `0fb4ba6`, native CI passed on Linux, macOS, and Windows with Python 3.13 and 3.14. A separate Windows job passed the no-usable-POSIX-shell checks on product code identical to that reference candidate. Its tool-calling and artifact-output conformance passed against two distinct OpenAI-compatible endpoint implementations. See the [reference native CI run](https://github.com/skanga/skillrunner/actions/runs/36650728357) and [reference Windows shell qualification](https://github.com/skanga/skillrunner/actions/runs/36653125690). The subsequent completion fixes have [separate native CI checks](https://github.com/skanga/skillrunner/pull/23/checks).
 
 ## Install and inspect
 
