@@ -1004,6 +1004,14 @@ async def test_real_command_and_configured_external_validator(tmp_path):
     manifest = json.loads(Path(receipt["manifest_path"]).read_text())
     assert manifest["outputs"]["artifacts"][0]["validation_level"] == "external"
     assert manifest["outputs"]["artifacts"][0]["validator"]["command"] == executable
+    runtimes = manifest["provenance"].get("external_runtimes", [])
+    assert len(runtimes) == 1  # Task and validator share the same executable identity.
+    assert runtimes[0]["family"] == "python"
+    assert runtimes[0]["outcome"] == "detected"
+    assert runtimes[0]["executable"] == executable
+    events = (Path(receipt["manifest_path"]).parent / "events.jsonl").read_text()
+    assert "runtime_provenance_started" in events
+    assert "runtime_provenance_stopped" in events
 
 
 @pytest.mark.parametrize("expanded_bytes", [100, 101])
@@ -1080,7 +1088,8 @@ async def test_archive_expansion_limit_controls_publication_and_partial_retentio
         assert sum(len(archive.read(name)) for name in archive.namelist()) == expanded_bytes
     events = [json.loads(line) for line in (root / "events.jsonl").read_text().splitlines()]
     names = [event["event_type"] for event in events]
-    assert names.count("process_stopped") == 1
+    assert names.count("process_stopped") == 2  # Runtime probe and task command.
+    assert names.count("runtime_provenance_stopped") == 1
     if expanded_bytes == 100:
         assert receipt["status"] == "succeeded" and receipt["exit_code"] == 0
         assert output.read_bytes() == retained.read_bytes()

@@ -121,6 +121,107 @@ async def test_errors_safe_and_never_retried(status: int, code: str) -> None:
 
 
 @pytest.mark.parametrize(
+    "parameter,capability",
+    [
+        ("tools", "tool_calling"),
+        ("tool_choice", "tool_calling"),
+        ("messages[0].content[1].image_url", "image_input"),
+        ("max_tokens", "output_token_parameter"),
+        ("max_completion_tokens", "output_token_parameter"),
+    ],
+)
+async def test_explicit_unsupported_capability_is_identified(parameter, capability):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(
+            400,
+            json={
+                "error": {
+                    "code": "unsupported_parameter",
+                    "param": parameter,
+                    "message": "PRIVATE endpoint prompt and credential",
+                }
+            },
+        )
+
+    token_parameter = parameter if parameter.startswith("max_") else "max_tokens"
+    client = adapter(profile(output_token_parameter=token_parameter), handler)
+    try:
+        with pytest.raises(RunnerError) as caught:
+            await client.complete(
+                [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "data:image/png;base64,PRIVATE",
+                                },
+                            }
+                        ],
+                    }
+                ],
+                [{"type": "function", "function": {"name": "finish"}}],
+                5,
+                deadline(),
+            )
+        error = caught.value
+        assert error.code == "unsupported_capability"
+        assert error.details["missing_capability"] == capability
+        assert error.details["retryable"] is False
+        assert error.details["suggested_action"]
+        assert "PRIVATE" not in str(error) + json.dumps(error.details)
+        assert len(calls) == 1
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {},
+        {"code": "invalid_value", "param": "tools"},
+        {"code": "unsupported_parameter", "param": "tools[0].function.parameters"},
+        {"code": "unsupported_parameter", "param": "PRIVATE" * 1000},
+        {"code": {"PRIVATE": "unsupported_parameter"}, "param": ["tools"]},
+        {"code": "unsupported_parameter", "param": "max_completion_tokens"},
+    ],
+)
+async def test_ambiguous_capability_rejection_does_not_guess_or_echo(fields):
+    client = adapter(
+        profile(),
+        lambda request: httpx.Response(
+            400, json={"error": {"message": "PRIVATE tools not supported", **fields}}
+        ),
+    )
+    try:
+        with pytest.raises(RunnerError) as caught:
+            await client.complete([], [], 5, deadline())
+        details = caught.value.details
+        assert details["missing_capability"] == "unknown"
+        assert details["requested_api"] == "chat_completions"
+        assert details["requested_capabilities"] == ["output_token_parameter"]
+        assert "could not be determined" in caught.value.message
+        assert "PRIVATE" not in str(caught.value) + json.dumps(details)
+        assert details["retryable"] is False
+    finally:
+        await client.aclose()
+
+
+async def test_metadata_rejection_does_not_claim_chat_completion_failure():
+    client = adapter(profile(), lambda request: httpx.Response(400))
+    try:
+        with pytest.raises(RunnerError) as caught:
+            await client.discover_capabilities(deadline())
+        assert caught.value.details["requested_api"] == "model_metadata"
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize(
     ("status", "retryable"),
     [(408, False), (429, True), (500, True), (501, True), (511, True)],
 )

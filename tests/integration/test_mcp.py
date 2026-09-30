@@ -53,6 +53,8 @@ def manager(tmp_path, **kwargs):
 
 async def test_stdio_catalog_invoke_and_close_from_other_task(tmp_path):
     bridge, supervisor = manager(tmp_path)
+    observations = []
+    supervisor.on_provenance = lambda name, record: observations.append((name, record))
     await bridge.connect()
     try:
         assert len(bridge.tools) == 1
@@ -69,6 +71,9 @@ async def test_stdio_catalog_invoke_and_close_from_other_task(tmp_path):
         except RunnerError as error:
             pytest.fail(f"{error.code}: {error.details}")
     assert not supervisor.active
+    assert observations[-1][0] == "runtime_provenance_outcome"
+    assert observations[-1][1]["family"] == "python"
+    assert observations[-1][1]["outcome"] == "detected"
 
 
 @pytest.mark.parametrize("structured", ["r['params']['arguments']", "{'different': True}"])

@@ -4,7 +4,7 @@ Skill Runner runs one task using local Agent Skills packages, writes the results
 
 The reference candidate (`0fb4ba6`) met the empirical qualification thresholds: 51 of 63 task trials (80.95%, including all failures and an independent grading correction) and 21 of 22 automatic-selection cases (95.45%, with one false activation). The task trials used a pinned GPT-5.5 executor with a Gemma image-inspection helper; these results do not guarantee the same quality from every compatible model.
 
-The full PRD completion audit remains open for runtime-version provenance and precise endpoint-capability diagnostics.
+Subsequent completion fixes add runtime-version provenance and precise endpoint-capability diagnostics. The empirical scores above remain measurements of `0fb4ba6`; no new paid qualification was performed for these fixes. Version probes add bounded process time and can stop a run if its deadline expires.
 
 Native CI passed on Linux, macOS, and Windows with Python 3.13 and 3.14. A separate Windows job passed the no-usable-POSIX-shell checks on identical product code. Tool-calling and artifact-output conformance passed against two distinct OpenAI-compatible endpoint implementations. See the [native CI run](https://github.com/skanga/skillrunner/actions/runs/36650728357) and [Windows shell qualification](https://github.com/skanga/skillrunner/actions/runs/36653125690).
 
@@ -155,6 +155,10 @@ Prompts, loaded skill instructions, input content read into context, and tool re
 ## Results and exit codes
 
 Each accepted execution creates a unique persistent bundle beneath the output directory. `result.md` is the report, `run.json` is the manifest, and retained artifacts are stored alongside them. The work directory is removed after cleanup unless diagnostic retention is enabled or incomplete work must be preserved. The JSON receipt identifies the run, status, exit code, primary output, report, manifest, artifacts, and errors. Tool chatter and diagnostics go to stderr.
+
+The manifest records OS details, the coordinator's Python version, and observed versions of external Python, Node.js, and shell runtimes. Before the first permitted launch of a recognized runtime, the runner probes its version once per executable identity. Each probe has at most two seconds of execution time within the existing command and run deadlines, plus the configured shutdown grace. Probe timeouts stop the run with exit 7. Unrecognized version output is recorded as unavailable; raw probe output is not included in the manifest or model context. These probes also cover local MCP servers and external validators.
+
+When an endpoint explicitly rejects a supported request field, the diagnostic identifies the missing tool-calling, image-input, or output-token-parameter capability and suggests a correction. Ambiguous rejections report that the capability could not be determined. Diagnostics do not repeat the endpoint's error body.
 
 `--output FILE` publishes the primary deliverable at that exact path while retaining the bundle. `--output DIRECTORY` publishes inside an existing directory using a unique generated filename with the validated format's extension. If the prompt explicitly names an output file, its basename is used inside that directory even when the model registers the artifact under another name. A path that does not yet exist is treated as a file path. Existing destination files remain unchanged unless `--overwrite` is supplied. Publication failure is nonzero and points to recoverable artifacts. If publication succeeds but final reporting fails, the published file remains. A report alone does not satisfy a requested binary deliverable.
 

@@ -189,12 +189,19 @@ class Coordinator:
         self.profile: ModelProfile
         self.supervisor = ProcessSupervisor(
             settings.policy,
+            on_provenance=self.runtime_provenance,
+            run_deadline=self.deadline,
             shutdown_grace=settings.limits.shutdown_grace,
             max_output_bytes=settings.storage.max_tool_output_bytes,
             on_stopped=lambda pid, returncode: self.event(
                 "process_stopped", {"pid": pid, "returncode": returncode}
             ),
         )
+
+    def runtime_provenance(self, name: str, record: dict[str, Any]) -> None:
+        if name == "runtime_provenance_outcome":
+            self.bundle.state["provenance"]["external_runtimes"].append(record)
+        self.event(name, record)
 
     def check(self) -> None:
         self.deadline.check()

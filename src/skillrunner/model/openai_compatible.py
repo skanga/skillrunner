@@ -57,7 +57,15 @@ def _protocol_error(field: str | None = None) -> RunnerError:
     )
 
 
-def _status_error(status: int, code: str | None = None) -> RunnerError:
+def _status_error(
+    status: int,
+    code: str | None = None,
+    *,
+    parameter: str | None = None,
+    requested_api: str = "chat_completions",
+    requested_capabilities: tuple[str, ...] = (),
+    output_token_parameter: str | None = None,
+) -> RunnerError:
     details: dict[str, Any] = {"http_status": status, "retryable": False}
     if status == 400 and code == "context_length_exceeded":
         details["suggested_action"] = (
@@ -76,11 +84,37 @@ def _status_error(status: int, code: str | None = None) -> RunnerError:
             details=details,
         )
     if status in {400, 404, 405, 415, 422}:
-        details["suggested_action"] = (
-            "Check the endpoint URL, model ID and configured request options."
+        capability = "unknown"
+        if code == "unsupported_parameter" and isinstance(parameter, str) and len(parameter) <= 128:
+            if parameter in {"tools", "tool_choice"}:
+                capability = "tool_calling"
+            elif re.fullmatch(r"messages\[[0-9]+\]\.content\[[0-9]+\]\.image_url", parameter):
+                capability = "image_input"
+            elif parameter == output_token_parameter:
+                capability = "output_token_parameter"
+            if capability not in requested_capabilities:
+                capability = "unknown"
+        details.update(
+            missing_capability=capability,
+            requested_api=requested_api,
+            requested_capabilities=list(requested_capabilities),
         )
+        details["suggested_action"] = {
+            "tool_calling": "Configure a model and endpoint that support Chat Completions tools.",
+            "image_input": "Configure an image-capable model and endpoint for image input.",
+            "output_token_parameter": (
+                "Configure output_token_parameter to a parameter supported by this endpoint."
+            ),
+        }.get(capability, "Check the endpoint URL, model ID and configured request options.")
         return RunnerError(
-            "unsupported_capability", "The endpoint does not support this request.", details=details
+            "unsupported_capability",
+            "The endpoint explicitly rejected a requested capability."
+            if capability != "unknown"
+            else (
+                "The endpoint rejected this request; "
+                "the unsupported capability could not be determined."
+            ),
+            details=details,
         )
     if status == 429 and code == "insufficient_quota":
         details["suggested_action"] = (
@@ -283,7 +317,31 @@ class OpenAICompatibleAdapter:
                     raise _protocol_error() from None
                 return _normalize(payload, response.http_response.headers.get("x-request-id"))
         except APIStatusError as error:
-            raise _status_error(error.status_code, error.code) from None
+            # Only bounded structured labels reach the fixed diagnostic mapping.
+            # Never retain the provider's message, body, or unrecognized labels.
+            code = error.code if isinstance(error.code, str) and len(error.code) <= 128 else None
+            parameter = (
+                error.param if isinstance(error.param, str) and len(error.param) <= 128 else None
+            )
+            requested = ["output_token_parameter"]
+            if tool_schemas:
+                requested.append("tool_calling")
+            if any(
+                isinstance(message.get("content"), list)
+                and any(
+                    isinstance(part, dict) and part.get("type") == "image_url"
+                    for part in message["content"]
+                )
+                for message in messages
+            ):
+                requested.append("image_input")
+            raise _status_error(
+                error.status_code,
+                code,
+                parameter=parameter,
+                requested_capabilities=tuple(requested),
+                output_token_parameter=self.profile.output_token_parameter,
+            ) from None
         except (TimeoutError, APITimeoutError):
             raise RunnerError(
                 "model_timeout",
@@ -342,7 +400,9 @@ class OpenAICompatibleAdapter:
                 ) as response:
                     if response.status_code not in {404, 405, 501}:
                         if response.status_code != 200:
-                            raise _status_error(response.status_code)
+                            raise _status_error(
+                                response.status_code, requested_api="model_metadata"
+                            )
                         body = bytearray()
                         async for chunk in response.aiter_bytes(chunk_size=65_536):
                             body.extend(chunk)

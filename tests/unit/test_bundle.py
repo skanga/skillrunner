@@ -199,3 +199,14 @@ def test_finalization_records_post_report_timing_and_renders_elapsed_time(tmp_pa
     assert manifest["usage"]["overall_elapsed_seconds_at_report"] == 3.25
     assert manifest["usage"]["reporting_elapsed_seconds_at_report"] == 0.75
     assert manifest["identity"]["finished_at"] == "finished-after-report"
+
+
+def test_platform_runtime_provenance(tmp_path):
+    import platform
+
+    bundle = api().RunBundle.create(tmp_path, invocation_directory=tmp_path)
+    provenance = json.loads((bundle.root / "run.json").read_text())["provenance"]
+    assert provenance.get("os_release") == platform.release()
+    assert provenance.get("os_version") == platform.version()
+    assert provenance.get("machine") == platform.machine()
+    assert provenance.get("external_runtimes") == []
