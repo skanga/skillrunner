@@ -53,6 +53,8 @@ def manager(tmp_path, **kwargs):
 
 async def test_stdio_catalog_invoke_and_close_from_other_task(tmp_path):
     bridge, supervisor = manager(tmp_path)
+    observations = []
+    supervisor.on_provenance = lambda name, record: observations.append((name, record))
     await bridge.connect()
     try:
         assert len(bridge.tools) == 1
@@ -68,6 +70,49 @@ async def test_stdio_catalog_invoke_and_close_from_other_task(tmp_path):
             await asyncio.create_task(bridge.aclose())
         except RunnerError as error:
             pytest.fail(f"{error.code}: {error.details}")
+    assert not supervisor.active
+    assert observations[-1][0] == "runtime_provenance_outcome"
+    assert observations[-1][1]["family"] == "python"
+    assert observations[-1][1]["outcome"] == "detected"
+
+
+@pytest.mark.parametrize("structured", ["r['params']['arguments']", "{'different': True}"])
+async def test_mcp_result_elides_only_redundant_structured_content(tmp_path, structured):
+    bridge, supervisor = manager(tmp_path)
+    original = "result={'content':[{'type':'text','text':json.dumps(r['params']['arguments'])}]}"
+    replacement = (
+        "result={'content':[{'type':'text','text':json.dumps(r['params']['arguments'])}],"
+        f"'structuredContent':{structured}}}"
+    )
+    bridge.configs["local"].args[1] = SERVER.replace(original, replacement)
+    await bridge.connect()
+    try:
+        result = await bridge.invoke(bridge.tools[0].name, {"hello": "world"})
+        assert json.loads(result["content"][0]["text"]) == {"hello": "world"}
+        if structured == "r['params']['arguments']":
+            assert "structuredContent" not in result
+        else:
+            assert result["structuredContent"] == {"different": True}
+    finally:
+        await bridge.aclose()
+    assert not supervisor.active
+
+
+async def test_mcp_result_preserves_structured_content_when_text_is_too_deep_to_parse(tmp_path):
+    bridge, supervisor = manager(tmp_path)
+    original = "result={'content':[{'type':'text','text':json.dumps(r['params']['arguments'])}]}"
+    replacement = (
+        "result={'content':[{'type':'text','text':'['*100000+']'*100000}],"
+        "'structuredContent':{'different':True}}"
+    )
+    bridge.configs["local"].args[1] = SERVER.replace(original, replacement)
+    await bridge.connect()
+    try:
+        result = await bridge.invoke(bridge.tools[0].name, {})
+        assert result["structuredContent"] == {"different": True}
+        assert len(result["content"][0]["text"]) == 200000
+    finally:
+        await bridge.aclose()
     assert not supervisor.active
 
 

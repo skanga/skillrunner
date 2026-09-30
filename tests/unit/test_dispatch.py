@@ -418,3 +418,60 @@ async def test_invalid_arguments_identify_only_declared_fields():
     assert any(issue.get("field") == "expected_sha256" for issue in issues)
     assert "secret-extra-field" not in json.dumps(issues)
     assert "private" not in json.dumps(issues)
+
+
+@pytest.mark.parametrize("extra", [False, True])
+async def test_overwrite_digest_guidance_is_safe_and_does_not_execute(extra):
+    registry = dispatch.ToolRegistry()
+    seen = []
+
+    async def handler(args):
+        seen.append(args)
+
+    registry.register("write_file", "Write", schemas.WriteFileArgs, handler)
+    arguments = {"path": "scratch/private", "content": "PRIVATE-CONTENT", "overwrite": True}
+    if extra:
+        arguments["SECRET-FIELD"] = "SECRET-VALUE"
+    usage = ledger()
+    result = (await registry.dispatch_batch([call("write_file", arguments)], usage, Deadline(10)))[
+        0
+    ]
+    assert usage.charged_tool_calls == 1
+    assert not result.executed and not seen
+    assert result.error["code"] == "invalid_arguments"
+    encoded = json.dumps(result.as_dict())
+    assert all(
+        secret not in encoded
+        for secret in ("PRIVATE-CONTENT", "SECRET-FIELD", "SECRET-VALUE", "scratch/private")
+    )
+    if not extra:
+        assert result.error["issues"] == [
+            {
+                "type": "overwrite_digest_required",
+                "field": "expected_sha256",
+                "guidance": (
+                    "Read the current file with read_text and copy its full SHA-256 into "
+                    "expected_sha256. Use overwrite=true only for intentional replacement."
+                ),
+            }
+        ]
+
+
+async def test_custom_validator_cannot_impersonate_overwrite_guidance():
+    from pydantic import model_validator
+    from pydantic_core import PydanticCustomError
+
+    class CustomArgs(schemas.WriteFileArgs):
+        @model_validator(mode="after")
+        def reject(self):
+            raise PydanticCustomError("overwrite_digest_required", "SECRET-MESSAGE")
+
+    registry = dispatch.ToolRegistry()
+
+    async def handler(args):
+        pytest.fail("Invalid calls must not execute")
+
+    registry.register("custom", "Custom", CustomArgs, handler)
+    result = (await registry.dispatch_batch([call("custom")], ledger(), Deadline(10)))[0]
+    assert result.error["issues"] == [{"type": "overwrite_digest_required"}]
+    assert "SECRET-MESSAGE" not in json.dumps(result.as_dict())

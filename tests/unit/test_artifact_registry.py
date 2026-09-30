@@ -308,3 +308,17 @@ def test_unrelated_hardlink_added_after_registration_blocks_freeze(tmp_path):
     with pytest.raises(RunnerError, match="artifact_invalid"):
         registry.freeze(item, writers_stopped=True)
     assert not list(paths["staging"].iterdir())
+
+
+def test_acceptance_snapshot_does_not_freeze_repairable_source(tmp_path):
+    registry, paths = setup_registry(tmp_path)
+    item = record(registry, paths, content="bad")
+    assert hasattr(registry, "acceptance_snapshot")
+    with registry.acceptance_snapshot(item) as candidate:
+        candidate_path = candidate.path
+        assert candidate.path.read_text() == "bad"
+        item.path.write_text("fixed")
+        assert candidate.path.read_text() == "bad"
+    assert not candidate_path.exists()
+    final = registry.freeze(item, writers_stopped=True)
+    assert final.path.read_text() == "fixed"

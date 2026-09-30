@@ -33,7 +33,10 @@ def returned_output_estimate(reply: ModelReply) -> int:
             for call in reply.tool_calls
         ],
     }
-    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    return (
+        len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        + reply.discarded_tool_call_bytes
+    )
 
 
 class AgentLoop:
@@ -96,8 +99,14 @@ class AgentLoop:
                         "attempt": reservation.attempt,
                         "input_estimate": estimate,
                         "output_limit": reservation.output_limit,
-                        "estimate_basis": "utf8_bytes",
-                        "_content": {"messages": self.context.messages(), "tools": schemas},
+                        "estimate_basis": "utf8_bytes+image_contract"
+                        if self.context.image_token_estimate
+                        else "utf8_bytes",
+                        "image_token_estimate": self.context.image_token_estimate,
+                        "_content": {
+                            "messages": self.context.diagnostic_messages(),
+                            "tools": schemas,
+                        },
                     },
                 )
                 messages = self.context.messages()
@@ -127,6 +136,12 @@ class AgentLoop:
                             {
                                 "attempt": reservation.attempt,
                                 "error_code": code,
+                                **(
+                                    {"response_field": failure.details["response_field"]}
+                                    if isinstance(failure, RunnerError)
+                                    and "response_field" in failure.details
+                                    else {}
+                                ),
                                 "measurement_quality": "unknown",
                                 "actual_usage": None,
                                 "budget_charge": reservation.total,
@@ -196,6 +211,12 @@ class AgentLoop:
                     },
                 },
             )
+            if reply.finish_reason == "length":
+                raise RunnerError(
+                    "budget_exhausted",
+                    "The model reached this request's output-token allowance. "
+                    "Partial outputs are preserved; no returned tools were dispatched.",
+                )
             self.context.append_public_reply(reply.public_text, reply.tool_calls)
             await asyncio.sleep(0)
             self.deadline.check()
@@ -210,6 +231,13 @@ class AgentLoop:
                 self.ledger,
                 self.deadline,
                 on_result=self._record_result,
+            )
+            self.context.append_media(
+                [
+                    result.attachment
+                    for result in results
+                    if result.ok and getattr(result, "attachment", None) is not None
+                ]
             )
             for result in results:
                 if result.name == "finish_run" and result.ok:

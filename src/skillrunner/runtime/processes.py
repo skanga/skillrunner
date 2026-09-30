@@ -22,6 +22,7 @@ from skillrunner.config.sources import verify_executable
 from skillrunner.domain.errors import RunnerError
 from skillrunner.runtime.budgets import Deadline
 from skillrunner.runtime.environment import ChildEnvironment
+from skillrunner.runtime.versions import parse_version, runtime_probe
 
 
 @dataclass(frozen=True)
@@ -106,6 +107,8 @@ class ProcessSupervisor:
         shutdown_grace: float = 5,
         max_output_bytes: int = 1_048_576,
         on_stopped: Callable[[int, int], None] | None = None,
+        on_provenance: Callable[[str, dict[str, Any]], None] | None = None,
+        run_deadline: Deadline | None = None,
     ) -> None:
         if not math.isfinite(shutdown_grace) or shutdown_grace < 0:
             raise ValueError("Shutdown grace must be finite and nonnegative")
@@ -115,6 +118,10 @@ class ProcessSupervisor:
         self.shutdown_grace = shutdown_grace
         self.max_output_bytes = max_output_bytes
         self.on_stopped = on_stopped
+        self.on_provenance = on_provenance
+        self.run_deadline = run_deadline
+        self._observed: set[tuple[int, int, int, int]] = set()
+        self._provenance_lock = asyncio.Lock()
         self.active: dict[int, SupervisedProcess] = {}
         self.cleanup_errors: list[str] = []
 
@@ -247,6 +254,121 @@ class ProcessSupervisor:
         if cancelled is not None:
             raise cancelled
 
+    def _check_admission(self, deadline: Deadline) -> None:
+        deadline.check()
+        if self.run_deadline is not None:
+            self.run_deadline.check()
+        task = asyncio.current_task()
+        if task is not None and task.cancelling():
+            raise asyncio.CancelledError
+
+    async def _observe(
+        self, executable: str, *, cwd: Path, environment: ChildEnvironment, deadline: Deadline
+    ) -> None:
+        report = self.on_provenance
+        if report is None:
+            return
+        probe = runtime_probe(executable)
+        if probe is None:
+            return
+        # Serialize concurrent first launches without caching beyond this run.
+        async with self._provenance_lock:
+            self._check_admission(deadline)
+            verify_executable(self.policy, executable)
+            identity = self.policy.executable_identities[executable]
+            if identity in self._observed:
+                return
+            self._observed.add(identity)
+            family, args, pattern = probe
+            record: dict[str, Any] = {
+                "family": family,
+                "executable": executable,
+                "identity": list(identity),
+                "version": None,
+                "outcome": "unavailable",
+            }
+            pid: int | None = None
+            primary_error: BaseException | None = None
+
+            def started(child_pid: int) -> None:
+                nonlocal pid
+                pid = child_pid
+                report("runtime_provenance_started", {**record, "pid": pid})
+
+            try:
+                if args:
+                    remaining = min(2.0, deadline.remaining)
+                    if self.run_deadline is not None:
+                        remaining = min(remaining, self.run_deadline.remaining)
+                    self._check_admission(deadline)
+                    if remaining <= 0:
+                        raise RunnerError("budget_exhausted", "Execution timeout reached.")
+                    result = await self._run(
+                        executable,
+                        args,
+                        cwd=cwd,
+                        environment=environment,
+                        deadline=Deadline(remaining),
+                        on_started=started,
+                    )
+                    if result.returncode == 0:
+                        if not result.stdout_truncated and not result.stderr_truncated:
+                            record["version"] = parse_version(pattern, result.stdout, result.stderr)
+                        if record["version"] is not None:
+                            record["outcome"] = "detected"
+                    else:
+                        record["outcome"] = "failed"
+            except RunnerError as exc:
+                record["outcome"] = "failed"
+                record["error_code"] = exc.code
+                if exc.code != "process_start_failed":
+                    primary_error = exc
+                    raise
+            except BaseException as exc:
+                primary_error = exc
+                record["outcome"] = (
+                    "cancelled" if isinstance(exc, asyncio.CancelledError) else "failed"
+                )
+                raise
+            finally:
+                pending = []
+                if pid is not None:
+                    pending.append(
+                        (
+                            "runtime_provenance_stopped",
+                            {
+                                "pid": pid,
+                                "cleanup_complete": pid not in self.active,
+                            },
+                        )
+                    )
+                pending.append(("runtime_provenance_outcome", record))
+                reporting_errors = []
+                for name, payload in pending:
+                    try:
+                        report(name, payload)
+                    except Exception:
+                        reporting_errors.append(
+                            {
+                                "code": "reporting_failed",
+                                "message": "Could not persist a runtime provenance event.",
+                            }
+                        )
+                if reporting_errors:
+                    message = "Runtime provenance reporting also failed."
+                    if primary_error is not None:
+                        primary_error.add_note(message)
+                        if isinstance(primary_error, RunnerError):
+                            primary_error.details.setdefault("reporting_errors", []).extend(
+                                reporting_errors
+                            )
+                    else:
+                        raise RunnerError(
+                            "reporting_failed",
+                            message,
+                            details={"reporting_errors": reporting_errors},
+                        ) from None
+
     @asynccontextmanager
     async def open(
         self,
@@ -258,8 +380,35 @@ class ProcessSupervisor:
         deadline: Deadline,
         stdin_pipe: bool = True,
     ) -> AsyncIterator[SupervisedProcess]:
+        self._check_admission(deadline)
+        if not isinstance(environment, ChildEnvironment):
+            raise TypeError("An explicit ChildEnvironment is required")
+        verify_executable(self.policy, executable)
+        await self._observe(executable, cwd=cwd, environment=environment, deadline=deadline)
+        async with self._open(
+            executable,
+            args,
+            cwd=cwd,
+            environment=environment,
+            deadline=deadline,
+            stdin_pipe=stdin_pipe,
+        ) as child:
+            yield child
+
+    @asynccontextmanager
+    async def _open(
+        self,
+        executable: str,
+        args: Sequence[str],
+        *,
+        cwd: Path,
+        environment: ChildEnvironment,
+        deadline: Deadline,
+        stdin_pipe: bool = True,
+        on_started: Callable[[int], None] | None = None,
+    ) -> AsyncIterator[SupervisedProcess]:
         """Lifetime and protocol operations share the execution deadline."""
-        deadline.check()
+        self._check_admission(deadline)
         if not isinstance(environment, ChildEnvironment):
             raise TypeError("An explicit ChildEnvironment is required")
         if os.name == "nt":
@@ -292,7 +441,12 @@ class ProcessSupervisor:
         self.active[child.pid] = child
         try:
             SupervisedProcess.__init__(child, native)
-            execution_timeout = asyncio.timeout(deadline.remaining)
+            if on_started is not None:
+                on_started(child.pid)
+            remaining = deadline.remaining
+            if self.run_deadline is not None:
+                remaining = min(remaining, self.run_deadline.remaining)
+            execution_timeout = asyncio.timeout(remaining)
             try:
                 async with execution_timeout:
                     yield child
@@ -309,7 +463,7 @@ class ProcessSupervisor:
         else:
             await self._finish(child)
 
-    async def run(
+    async def _run(
         self,
         executable: str,
         args: Sequence[str],
@@ -317,6 +471,8 @@ class ProcessSupervisor:
         cwd: Path,
         environment: ChildEnvironment,
         deadline: Deadline,
+        observe: bool = False,
+        on_started: Callable[[int], None] | None = None,
     ) -> CommandResult:
         captured = [bytearray(), bytearray()]
         counts = [0, 0]
@@ -330,8 +486,20 @@ class ProcessSupervisor:
                 captured[index].extend(chunk[:kept])
                 remaining -= kept
 
-        async with self.open(
-            executable, args, cwd=cwd, environment=environment, deadline=deadline, stdin_pipe=False
+        if observe:
+            self._check_admission(deadline)
+            if not isinstance(environment, ChildEnvironment):
+                raise TypeError("An explicit ChildEnvironment is required")
+            verify_executable(self.policy, executable)
+            await self._observe(executable, cwd=cwd, environment=environment, deadline=deadline)
+        async with self._open(
+            executable,
+            args,
+            cwd=cwd,
+            environment=environment,
+            deadline=deadline,
+            stdin_pipe=False,
+            on_started=on_started,
         ) as child:
             child.drainers = [
                 asyncio.create_task(drain(child.stdout, 0)),
@@ -348,4 +516,17 @@ class ProcessSupervisor:
             counts[1],
             counts[0] > len(captured[0]),
             counts[1] > len(captured[1]),
+        )
+
+    async def run(
+        self,
+        executable: str,
+        args: Sequence[str],
+        *,
+        cwd: Path,
+        environment: ChildEnvironment,
+        deadline: Deadline,
+    ) -> CommandResult:
+        return await self._run(
+            executable, args, cwd=cwd, environment=environment, deadline=deadline, observe=True
         )

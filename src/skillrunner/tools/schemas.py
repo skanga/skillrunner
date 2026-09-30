@@ -3,6 +3,7 @@
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic_core import PydanticCustomError
 
 Nonempty = Annotated[str, Field(min_length=1)]
 Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
@@ -41,6 +42,11 @@ class ReadMediaArgs(ToolArgs):
     representation: Nonempty
 
 
+class InspectImageArgs(ToolArgs):
+    path: Nonempty
+    question: Nonempty
+
+
 class WriteFileArgs(ToolArgs):
     path: Nonempty
     content: str
@@ -58,7 +64,9 @@ class WriteFileArgs(ToolArgs):
     @model_validator(mode="after")
     def require_overwrite_digest(self) -> "WriteFileArgs":
         if self.overwrite and self.expected_sha256 is None:
-            raise ValueError("Overwrite requires an expected digest.")
+            raise PydanticCustomError(
+                "overwrite_digest_required", "Overwrite requires an expected digest."
+            )
         return self
 
 
@@ -100,8 +108,15 @@ class RegisterArtifactArgs(ToolArgs):
 class FinishRunArgs(ToolArgs):
     outcome: Literal["succeeded", "no_matching_skill", "needs_input", "blocked", "failed"]
     report: str
-    primary_artifact_id: str | None = None
-    secondary_ids: list[str] = Field(default_factory=list)
+    primary_artifact_id: str | None = Field(
+        default=None,
+        description="ID returned by register_artifact, or null for a text-only report. "
+        "Never put an external page or record ID here; include it in report instead.",
+    )
+    secondary_ids: list[str] = Field(
+        default_factory=list,
+        description="Only IDs returned by register_artifact for secondary generated files.",
+    )
     missing_requirements: list[str] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
 

@@ -3,8 +3,10 @@
 import base64
 import io
 import json
+import struct
 import sys
 import zipfile
+import zlib
 from copy import deepcopy
 from pathlib import Path
 
@@ -85,6 +87,140 @@ async def test_missing_model_credential_blocks_with_persisted_guidance(tmp_path)
     manifest = manifest_for(receipt)
     assert manifest["lifecycle"]["status"] == "blocked"
     assert manifest["lifecycle"]["exit_code"] == 4
+
+
+async def test_required_skill_decision_returns_needs_input_without_publishing(tmp_path):
+    settings = fixture(tmp_path)
+    skill = settings.skills_dir / "writer/SKILL.md"
+    skill.write_text(
+        "---\nname: writer\ndescription: Write a report for a chosen audience.\n---\n"
+        "Before writing, ask whether the report is for internal or external readers. "
+        "Do not choose an audience on the user's behalf.\n"
+    )
+    publication = tmp_path / "report.md"
+    question = "Should this report address internal or external readers?"
+    calls = [
+        [
+            call(
+                "activate_skill",
+                {"name": "writer", "reason": "Follow the audience rule"},
+                "activate",
+            )
+        ],
+        [
+            call(
+                "finish_run",
+                {
+                    "outcome": "needs_input",
+                    "report": question,
+                    "missing_requirements": [question],
+                },
+                "finish",
+            )
+        ],
+    ]
+    receipt = await run_task(
+        RunRequest(
+            prompt="Write a report without choosing its audience for me",
+            invocation_directory=tmp_path,
+            required_skills=["writer"],
+            output=publication,
+        ),
+        settings,
+        environ={},
+        adapter_factory=lambda profile, key: Adapter(profile, calls),
+    )
+
+    assert receipt["status"] == "needs_input"
+    assert receipt["exit_code"] == 5
+    assert receipt["primary_output"] is None
+    assert receipt["artifact_paths"] == []
+    assert not publication.exists()
+    assert receipt["errors"][0]["code"] == "missing_decision"
+    assert receipt["errors"][0]["suggested_action"] == question
+    assert question in Path(receipt["report_path"]).read_text()
+    manifest = manifest_for(receipt)
+    assert [skill["name"] for skill in manifest["provenance"]["activated_skills"]] == ["writer"]
+    assert manifest["lifecycle"]["status"] == "needs_input"
+    assert manifest["outputs"]["publication"]["state"] != "committed"
+
+
+async def test_transient_model_retry_is_new_attempt_without_replaying_tools(tmp_path):
+    settings = fixture(tmp_path)
+    adapters = []
+
+    class FlakyAdapter(Adapter):
+        def __init__(self, profile):
+            super().__init__(
+                profile,
+                [
+                    [
+                        call(
+                            "activate_skill",
+                            {"name": "writer", "reason": "Write report"},
+                            "activate",
+                        )
+                    ],
+                    finish(),
+                ],
+            )
+            self.attempts = 0
+
+        async def complete(self, *args):
+            self.attempts += 1
+            if self.attempts == 1:
+                self.requests.append(args[0])
+                raise RunnerError(
+                    "model_transport_error",
+                    "Transient model connection failure.",
+                    details={"retryable": True, "outcome_certainty": "unknown"},
+                )
+            return await super().complete(*args)
+
+    def factory(profile, key):
+        adapter = FlakyAdapter(profile)
+        adapters.append(adapter)
+        return adapter
+
+    receipt = await run_task(
+        RunRequest(
+            prompt="Write a report",
+            invocation_directory=tmp_path,
+            required_skills=["writer"],
+        ),
+        settings,
+        environ={},
+        adapter_factory=factory,
+    )
+
+    assert receipt["status"] == "succeeded"
+    assert receipt["exit_code"] == 0
+    assert len(adapters) == 1
+    assert adapters[0].attempts == len(adapters[0].requests) == 3
+    assert "Completed answer." in Path(receipt["primary_output"]).read_text()
+    manifest = manifest_for(receipt)
+    assert manifest["usage"]["model_attempts"] == 3
+    assert set(manifest["usage"]["measurement_quality"]) == {"unknown", "reported"}
+    events = [
+        json.loads(line)
+        for line in Path(receipt["manifest_path"])
+        .with_name("events.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    assert [
+        event["payload"]["retry_number"]
+        for event in events
+        if event["event_type"] == "model_retry_scheduled"
+    ] == [1]
+    assert [
+        event["payload"]["measurement_quality"]
+        for event in events
+        if event["event_type"] == "model_request_failed"
+    ] == ["unknown"]
+    assert [
+        event["payload"]["call_id"] for event in events if event["event_type"] == "tool_started"
+    ] == ["activate", "one"]
 
 
 async def test_provider_context_rejection_preserves_full_history_and_partial_artifact(tmp_path):
@@ -373,6 +509,103 @@ async def test_valid_docx_fixture_is_container_validated_and_published(tmp_path)
     assert manifest["outputs"]["publication"]["state"] == "committed"
 
 
+def minimal_png_bytes():
+    def chunk(kind, data):
+        return (
+            len(data).to_bytes(4, "big") + kind + data + zlib.crc32(kind + data).to_bytes(4, "big")
+        )
+
+    header = struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0)
+    pixel = zlib.compress(b"\x00\xff\x00\x00\xff")
+    return (
+        b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", pixel) + chunk(b"IEND", b"")
+    )
+
+
+async def test_valid_png_uses_configured_external_validator_before_publication(tmp_path):
+    fixture(tmp_path)
+    executable = str(Path(sys.executable).resolve())
+    validator_code = (
+        "import pathlib,struct,sys,zlib\n"
+        "blob=pathlib.Path(sys.argv[1]).read_bytes()\n"
+        "assert blob[:8] == b'\\x89PNG\\r\\n\\x1a\\n'\n"
+        "offset=8; chunks=[]\n"
+        "while offset < len(blob):\n"
+        "  size=int.from_bytes(blob[offset:offset+4], 'big'); offset+=4\n"
+        "  kind=blob[offset:offset+4]; offset+=4\n"
+        "  data=blob[offset:offset+size]; offset+=size\n"
+        "  crc=int.from_bytes(blob[offset:offset+4], 'big'); offset+=4\n"
+        "  assert len(kind)==4 and len(data)==size and crc==zlib.crc32(kind+data)\n"
+        "  chunks.append((kind,data))\n"
+        "assert offset==len(blob) and [kind for kind,_ in chunks]==[b'IHDR',b'IDAT',b'IEND']\n"
+        "assert struct.unpack('>IIBBBBB',chunks[0][1])==(1,1,8,6,0,0,0)\n"
+        "assert zlib.decompress(chunks[1][1])==b'\\x00\\xff\\x00\\x00\\xff'\n"
+        "assert chunks[2][1]==b''\n"
+    )
+    config = tmp_path / "skillrun.toml"
+    config.write_text(
+        config.read_text()
+        + "\n[policy]\nallowed_executables = ["
+        + json.dumps(executable)
+        + "]\n[artifacts.validators.png]\ncommand = "
+        + json.dumps(executable)
+        + "\nargs = "
+        + json.dumps(["-c", validator_code, "{path}"])
+        + "\n"
+    )
+    settings = resolve_settings(tmp_path, {}, {})
+    image = minimal_png_bytes()
+    write_png = (
+        "import base64,pathlib; "
+        f"pathlib.Path('result.png').write_bytes(base64.b64decode({base64.b64encode(image).decode()!r}))"
+    )
+    publication = tmp_path / "published.png"
+    calls = [
+        [
+            call(
+                "run_command",
+                {"executable": executable, "argv": ["-c", write_png], "cwd": "scratch"},
+                "write",
+            )
+        ],
+        [
+            call(
+                "register_artifact",
+                {
+                    "path": "scratch/result.png",
+                    "format": "png",
+                    "role": "primary",
+                    "description": "Validated PNG fixture",
+                },
+                "register",
+            )
+        ],
+        registered_primary,
+    ]
+    receipt = await run_task(
+        RunRequest(
+            prompt="Create a PNG",
+            invocation_directory=tmp_path,
+            required_skills=["writer"],
+            format="png",
+            output=publication,
+        ),
+        settings,
+        environ={},
+        adapter_factory=lambda profile, key: Adapter(profile, calls),
+    )
+
+    assert receipt["status"] == "succeeded", receipt
+    assert publication.read_bytes() == image
+    manifest = manifest_for(receipt)
+    artifact = manifest["outputs"]["artifacts"][0]
+    assert artifact["status"] == "validated"
+    assert artifact["format"] == "png"
+    assert artifact["validation_level"] == "external"
+    assert artifact["validator"]["command"] == executable
+    assert manifest["outputs"]["publication"]["state"] == "committed"
+
+
 async def test_wrong_command_directory_can_recover_using_reported_workspace_roots(tmp_path):
     import os
 
@@ -461,3 +694,66 @@ async def test_wrong_command_directory_can_recover_using_reported_workspace_root
     assert json.loads(Path(receipt["primary_output"]).read_text()) == {"recovered": True}
     assert not wrong_directory.exists()
     assert manifest_for(receipt)["lifecycle"]["cleanup"]["owned_pids_remaining"] == []
+
+
+async def test_aggregate_token_exhaustion_finalizes_partial_artifact_and_cleanup(tmp_path):
+    from skillrunner.model.protocol import ModelReply, ModelUsage
+
+    settings = fixture(tmp_path)
+    settings.limits.max_tokens = 100_000
+    publication = tmp_path / "published.json"
+
+    class MeteredAdapter(Adapter):
+        async def complete(self, messages, tool_schemas, output_limit, request_deadline):
+            reply = await super().complete(messages, tool_schemas, output_limit, request_deadline)
+            # Two individually admissible turns consume the cumulative allowance.
+            usage = ModelUsage(49_970, 30, 50_000)
+            return ModelReply(reply.public_text, reply.tool_calls, reply.finish_reason, usage, None)
+
+    adapter = MeteredAdapter(
+        settings.models["test"],
+        [
+            [call("write_file", {"path": "scratch/partial.json", "content": '{"partial":true}'})],
+            [
+                call(
+                    "register_artifact",
+                    {
+                        "path": "scratch/partial.json",
+                        "format": "json",
+                        "role": "primary",
+                        "description": "Partial result",
+                    },
+                )
+            ],
+            finish(),
+        ],
+    )
+    receipt = await run_task(
+        RunRequest(
+            prompt="Write JSON",
+            invocation_directory=tmp_path,
+            required_skills=["writer"],
+            output=publication,
+            format="json",
+        ),
+        settings,
+        environ={},
+        adapter_factory=lambda profile, key: adapter,
+    )
+    assert receipt["status"] == "limit_exceeded" and receipt["exit_code"] == 7
+    assert receipt["errors"][0]["code"] == "budget_exhausted"
+    assert "Aggregate token budget" in Path(receipt["report_path"]).read_text()
+    assert len(adapter.requests) == 2 and adapter.closed
+    assert receipt["primary_output"] is None
+    assert not publication.exists()
+    manifest = manifest_for(receipt)
+    assert manifest["lifecycle"]["status"] == "limit_exceeded"
+    assert manifest["lifecycle"]["exit_code"] == 7
+    assert manifest["lifecycle"]["cleanup"] == {"work_retained": False, "owned_pids_remaining": []}
+    assert manifest["usage"]["charged_tokens"] == 100_000
+    assert manifest["usage"]["model_attempts"] == 2
+    (artifact,) = manifest["outputs"]["artifacts"]
+    assert artifact["status"] == "incomplete"
+    assert json.loads(Path(artifact["path"]).read_text()) == {"partial": True}
+    assert artifact["path"] in receipt["artifact_paths"]
+    assert not (Path(receipt["manifest_path"]).parent / "work").exists()

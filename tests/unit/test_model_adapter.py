@@ -121,6 +121,107 @@ async def test_errors_safe_and_never_retried(status: int, code: str) -> None:
 
 
 @pytest.mark.parametrize(
+    "parameter,capability",
+    [
+        ("tools", "tool_calling"),
+        ("tool_choice", "tool_calling"),
+        ("messages[0].content[1].image_url", "image_input"),
+        ("max_tokens", "output_token_parameter"),
+        ("max_completion_tokens", "output_token_parameter"),
+    ],
+)
+async def test_explicit_unsupported_capability_is_identified(parameter, capability):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(
+            400,
+            json={
+                "error": {
+                    "code": "unsupported_parameter",
+                    "param": parameter,
+                    "message": "PRIVATE endpoint prompt and credential",
+                }
+            },
+        )
+
+    token_parameter = parameter if parameter.startswith("max_") else "max_tokens"
+    client = adapter(profile(output_token_parameter=token_parameter), handler)
+    try:
+        with pytest.raises(RunnerError) as caught:
+            await client.complete(
+                [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "data:image/png;base64,PRIVATE",
+                                },
+                            }
+                        ],
+                    }
+                ],
+                [{"type": "function", "function": {"name": "finish"}}],
+                5,
+                deadline(),
+            )
+        error = caught.value
+        assert error.code == "unsupported_capability"
+        assert error.details["missing_capability"] == capability
+        assert error.details["retryable"] is False
+        assert error.details["suggested_action"]
+        assert "PRIVATE" not in str(error) + json.dumps(error.details)
+        assert len(calls) == 1
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {},
+        {"code": "invalid_value", "param": "tools"},
+        {"code": "unsupported_parameter", "param": "tools[0].function.parameters"},
+        {"code": "unsupported_parameter", "param": "PRIVATE" * 1000},
+        {"code": {"PRIVATE": "unsupported_parameter"}, "param": ["tools"]},
+        {"code": "unsupported_parameter", "param": "max_completion_tokens"},
+    ],
+)
+async def test_ambiguous_capability_rejection_does_not_guess_or_echo(fields):
+    client = adapter(
+        profile(),
+        lambda request: httpx.Response(
+            400, json={"error": {"message": "PRIVATE tools not supported", **fields}}
+        ),
+    )
+    try:
+        with pytest.raises(RunnerError) as caught:
+            await client.complete([], [], 5, deadline())
+        details = caught.value.details
+        assert details["missing_capability"] == "unknown"
+        assert details["requested_api"] == "chat_completions"
+        assert details["requested_capabilities"] == ["output_token_parameter"]
+        assert "could not be determined" in caught.value.message
+        assert "PRIVATE" not in str(caught.value) + json.dumps(details)
+        assert details["retryable"] is False
+    finally:
+        await client.aclose()
+
+
+async def test_metadata_rejection_does_not_claim_chat_completion_failure():
+    client = adapter(profile(), lambda request: httpx.Response(400))
+    try:
+        with pytest.raises(RunnerError) as caught:
+            await client.discover_capabilities(deadline())
+        assert caught.value.details["requested_api"] == "model_metadata"
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize(
     ("status", "retryable"),
     [(408, False), (429, True), (500, True), (501, True), (511, True)],
 )
@@ -571,5 +672,192 @@ async def test_completion_json_integer_limit_failure_is_safe() -> None:
         with pytest.raises(RunnerError, match="model_protocol_error") as exc:
             await client.complete([], [], 10, deadline())
         assert "PRIVATE" not in str(exc.value)
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize("content", [None, "", "Partial answer"])
+@pytest.mark.parametrize("arguments", [None, '{"path":', '{"path":"scratch/file"}'])
+async def test_length_response_preserves_usage_without_action_batch(content, arguments):
+    message = {"role": "assistant", "content": content}
+    if arguments is not None:
+        message["tool_calls"] = [
+            {
+                "id": "one",
+                "type": "function",
+                "function": {
+                    "name": "read_text",
+                    "arguments": arguments,
+                },
+            }
+        ]
+    payload = reply(
+        choices=[{"finish_reason": "length", "message": message}],
+        usage={"prompt_tokens": 100, "completion_tokens": 17, "total_tokens": 117},
+    )
+    client = adapter(profile(), lambda request: httpx.Response(200, json=payload))
+    try:
+        result = await client.complete([], [], 17, deadline())
+        assert result.finish_reason == "length"
+        assert result.public_text == content
+        assert result.tool_calls == ()
+        assert result.usage.input_tokens == 100
+        assert result.usage.output_tokens == 17
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"role": "user", "content": "partial"},
+        {"role": "assistant", "content": {}},
+        {"role": "assistant", "tool_calls": "invalid"},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "one",
+                    "type": "function",
+                    "function": {"name": "read_text", "arguments": {}},
+                }
+            ],
+        },
+    ],
+)
+async def test_length_response_still_rejects_malformed_envelopes(message):
+    payload = reply(choices=[{"finish_reason": "length", "message": message}])
+    client = adapter(profile(), lambda request: httpx.Response(200, json=payload))
+    try:
+        with pytest.raises(RunnerError) as caught:
+            await client.complete([], [], 17, deadline())
+        assert caught.value.code == "model_protocol_error"
+    finally:
+        await client.aclose()
+
+
+async def test_truncated_arguments_without_usage_are_counted_but_not_dispatchable():
+    from skillrunner.runtime.agent import returned_output_estimate
+
+    arguments = '{"content":"' + "界" * 500
+    payload = reply(
+        choices=[
+            {
+                "finish_reason": "length",
+                "message": {
+                    "role": "assistant",
+                    "content": "Partial",
+                    "tool_calls": [
+                        {
+                            "id": "one",
+                            "type": "function",
+                            "function": {
+                                "name": "write_file",
+                                "arguments": arguments,
+                            },
+                        }
+                    ],
+                    "reasoning_content": "PRIVATE_REASONING" * 1000,
+                },
+            }
+        ]
+    )
+    client = adapter(profile(), lambda request: httpx.Response(200, json=payload))
+    try:
+        result = await client.complete([], [], 4096, deadline())
+        assert result.usage is None
+        assert result.tool_calls == ()
+        assert len(arguments.encode("utf-8")) <= returned_output_estimate(result) < 2000
+        assert "PRIVATE_REASONING" not in repr(result)
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize(
+    "choice,field",
+    [
+        (None, "choices"),
+        ({"finish_reason": "PRIVATE", "message": {}}, "choices[0].finish_reason"),
+        ({"finish_reason": "stop", "message": {"role": "PRIVATE"}}, "choices[0].message.role"),
+        (
+            {"finish_reason": "stop", "message": {"role": "assistant", "content": {"PRIVATE": 1}}},
+            "choices[0].message.content",
+        ),
+        (
+            {
+                "finish_reason": "tool_calls",
+                "message": {"role": "assistant", "tool_calls": "PRIVATE"},
+            },
+            "choices[0].message.tool_calls",
+        ),
+        (
+            {
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "one",
+                            "type": "function",
+                            "function": {"name": "read_text", "arguments": "PRIVATE"},
+                        }
+                    ],
+                },
+            },
+            "choices[0].message.tool_calls[].function.arguments",
+        ),
+        (
+            {"finish_reason": "tool_calls", "message": {"role": "assistant", "content": "PRIVATE"}},
+            "completion_consistency",
+        ),
+    ],
+)
+async def test_protocol_errors_identify_safe_response_field(choice, field):
+    payload = reply(choices=[] if choice is None else [choice])
+    client = adapter(profile(), lambda request: httpx.Response(200, json=payload))
+    try:
+        with pytest.raises(RunnerError) as exc:
+            await client.complete([], [], 17, deadline())
+        assert exc.value.code == "model_protocol_error"
+        assert exc.value.details["response_field"] == field
+        assert exc.value.details.get("retryable") is not True
+        assert "PRIVATE" not in str(exc.value)
+        assert "PRIVATE" not in json.dumps(exc.value.details)
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize("content", [None, "", " \n\t"])
+@pytest.mark.parametrize("tools", [None, []])
+async def test_empty_stop_is_retryable_but_still_protocol_error(content, tools):
+    payload = reply(
+        choices=[
+            {
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": content, "tool_calls": tools},
+            }
+        ]
+    )
+    client = adapter(profile(), lambda request: httpx.Response(200, json=payload))
+    try:
+        with pytest.raises(RunnerError) as exc:
+            await client.complete([], [], 17, deadline())
+        assert exc.value.code == "model_protocol_error"
+        assert exc.value.details["retryable"] is True
+        assert exc.value.details["response_field"] == "completion_consistency"
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize("finish", ["tool_calls", "content_filter"])
+async def test_other_empty_terminal_shapes_are_not_retryable(finish):
+    payload = reply(
+        choices=[{"finish_reason": finish, "message": {"role": "assistant", "content": None}}]
+    )
+    client = adapter(profile(), lambda request: httpx.Response(200, json=payload))
+    try:
+        with pytest.raises(RunnerError) as exc:
+            await client.complete([], [], 17, deadline())
+        assert exc.value.details.get("retryable") is not True
     finally:
         await client.aclose()

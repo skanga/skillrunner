@@ -392,7 +392,8 @@ async def test_process_stop_event_and_failure_preserve_cleanup(
         assert not stopped
     else:
         assert receipt["exit_code"] == 0
-        assert len(stopped) == 1
+        assert len(stopped) == 2  # Runtime probe and task command.
+        assert sum(event["event_type"] == "runtime_provenance_stopped" for event in events) == 1
         assert stopped[0]["payload"]["returncode"] == 0
         assert stopped[0]["payload"]["pid"] > 0
         assert stopped[0]["call_id"] == "child"

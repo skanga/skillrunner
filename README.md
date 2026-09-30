@@ -2,7 +2,11 @@
 
 Skill Runner runs one task using local Agent Skills packages, writes the results and an execution report, then exits. It selects relevant skills from their descriptions. `--skill` requires named skills while still allowing additional skills when needed.
 
-The implementation is under release qualification. The CI matrix targets Linux, macOS, and Windows with Python 3.13 and 3.14. A configured matrix is not evidence that all native platform checks or real-model quality gates have passed.
+The reference candidate (`0fb4ba6`) met the empirical qualification thresholds: 51 of 63 task trials (80.95%, including all failures and an independent grading correction) and 21 of 22 automatic-selection cases (95.45%, with one false activation). The task trials used a pinned GPT-5.5 executor with a Gemma image-inspection helper; these results do not guarantee the same quality from every compatible model.
+
+Subsequent completion fixes add runtime-version provenance and precise endpoint-capability diagnostics. The empirical scores above remain measurements of `0fb4ba6`; no new paid qualification was performed for these fixes. Version probes add bounded process time and can stop a run if its deadline expires.
+
+For reference candidate `0fb4ba6`, native CI passed on Linux, macOS, and Windows with Python 3.13 and 3.14. A separate Windows job passed the no-usable-POSIX-shell checks on product code identical to that reference candidate. Its tool-calling and artifact-output conformance passed against two distinct OpenAI-compatible endpoint implementations. See the [reference native CI run](https://github.com/skanga/skillrunner/actions/runs/36650728357) and [reference Windows shell qualification](https://github.com/skanga/skillrunner/actions/runs/36653125690). The subsequent completion fixes have [separate native CI checks](https://github.com/skanga/skillrunner/pull/23/checks).
 
 ## Install and inspect
 
@@ -87,6 +91,7 @@ Short aliases are case-sensitive. Repeated input and skill options accumulate in
 | `--max-steps` | Model-turn limit; default `40` |
 | `--max-tool-calls` | Aggregate tool-call limit; default `100` |
 | `--max-tokens` | Aggregate input/output token budget; default `100000` |
+| `--model-transport-retries` | Shared retries for transient model transport failures and empty terminal completions; default `1` |
 | `--shutdown-grace` | Child shutdown grace; default `5s` |
 | `--overwrite` | Allow replacing the explicitly requested primary output |
 | `-j, --json` | One terminal JSON receipt on stdout |
@@ -94,6 +99,8 @@ Short aliases are case-sensitive. Repeated input and skill options accumulate in
 | `-h, --help` | Usage and examples without starting a run |
 
 Durations require `ms`, `s`, `m`, or `h`, for example `500ms`, `1.5m`, or `1h`. TOML durations must be strings. Only shutdown grace permits zero (`0s`). Integer limits must be positive. Cleanup and final reporting can extend beyond the execution deadline.
+
+An empty assistant completion (`finish_reason="stop"`, blank or null content, and no tool calls) is recorded as a protocol error and may use the same retry allowance as HTTP 429/5xx and connection failures. Each attempt is separately charged within existing budgets; zero retries disables recovery. Other protocol errors and output-length stops are not retried, and dispatched tools are never replayed automatically.
 
 Storage limits are configured in `[storage]`. Defaults permit 10,000 input files totaling 1 GiB, 20,000 activated-package files totaling 512 MiB, 2 GiB of artifacts, and 4 GiB of scratch data. Tool output is bounded at 1 MiB, event logs at 10 MiB, individual reads at 64 KiB, and expanded archives at 256 MiB. Exceeding a limit produces an explicit failure; required input and instructions are not silently omitted. MCP tool results share the tool-output and execution budgets.
 
@@ -121,11 +128,19 @@ The adapter uses Chat Completions and preserves the endpoint path prefix. It doe
 
 Provide `context_window_tokens` and `max_output_tokens` from the model's documented limits, or configure `[models.<alias>.discovery]` with an endpoint-relative `path` and dotted `context_window_field` / `max_output_field` mappings. The adapter probes model metadata but does not assume every service exposes capacity fields. Missing capacities block execution rather than guessing. Configured values take precedence over discovered values. Set `output_token_parameter` to `max_tokens` or `max_completion_tokens` as required by the endpoint.
 
+[examples/skillrun.toml](examples/skillrun.toml) shows all supported top-level sections: model profiles, direct-model settings, limits, storage, policy, MCP, artifact validators, and diagnostics. Optional inference options belong in `[models.<alias>.request_options]` or `[direct_model.request_options]`. PNG inspection is opt-in: configure `input_modalities = ["text", "image"]`, `image_accounting = "openai-patch-high-v1"`, and an allowlisted `[artifacts.validators.png]` parser. Then `read_media` with `representation = "image"` validates a copy and sends the PNG at high detail after the tool batch. The original input is unchanged. Other formats, missing capabilities, and missing validators return `unsupported_capability`.
+
+The `openai-patch-high-v1` accounting contract uses 32-pixel patches, a 2048-pixel dimension limit, a 2500-patch budget, and a 1.2 multiplier, plus one token for rounding. Select it only for an endpoint implementing those rules; model names do not select it automatically. Image tokens are estimated separately and charged on every request retaining the image. Context, aggregate-token, and tool-output byte limits still apply. Oversized images fail rather than being truncated. Logs retain image metadata and digests, never the image payload, even with `--log-content`. Audio, video, remote-image fetching, and automatic PDF conversion are unsupported; provisioned tools can render PDF pages to PNG before inspection.
+
+For Gemma 4 deployments using the standard single-image processor, explicitly select `image_accounting = "gemma4-image-max-v1"`. This reserves 1,122 tokens per image per request: up to 1,120 visual tokens plus two image boundary tokens. Select this contract only when the deployment uses those limits; custom cropping or expansion needs a matching contract. It preserves the same PNG validation, high-detail transport, byte limits, and metadata-only logs. Configure context and output limits for your deployment separately.
+
 The conversation and skill instructions must fit the context window. The runner does not silently truncate instructions, summarize history, or discard earlier turns to continue. Task requests require model tool calling; incompatible responses produce a failure instead of fabricated execution.
 
 ## Files, host execution, and connectors
 
 Inputs and activated packages are snapshotted and read-only through runner-managed file tools. Paths mentioned only in a prompt do not grant file access; pass files with `--input`. Put output locations outside input trees. In particular, `--input .` conflicts with default `./outputs`; choose a separate `--output-dir` and, if supplied, `--output`.
+
+With no `-i/--input`, the run receives no input snapshot. With no `-o/--output`, the primary deliverable stays in its run bundle under `./outputs` by default.
 
 **Host scripts are not sandboxed.** They run with the host user's filesystem and network access. Runner-managed path checks and executable allowlists govern dispatch but cannot contain a script after launch. Run only trusted packages. Container isolation is deferred.
 
@@ -140,6 +155,10 @@ Prompts, loaded skill instructions, input content read into context, and tool re
 ## Results and exit codes
 
 Each accepted execution creates a unique persistent bundle beneath the output directory. `result.md` is the report, `run.json` is the manifest, and retained artifacts are stored alongside them. The work directory is removed after cleanup unless diagnostic retention is enabled or incomplete work must be preserved. The JSON receipt identifies the run, status, exit code, primary output, report, manifest, artifacts, and errors. Tool chatter and diagnostics go to stderr.
+
+The manifest records OS details, the coordinator's Python version, and observed versions of external Python, Node.js, and shell runtimes. Before the first permitted launch of a recognized runtime, the runner probes its version once per executable identity. Each probe has at most two seconds of execution time within the existing command and run deadlines, plus the configured shutdown grace. Probe timeouts stop the run with exit 7. Unrecognized version output is recorded as unavailable; raw probe output is not included in the manifest or model context. These probes also cover local MCP servers and external validators.
+
+When an endpoint explicitly rejects a supported request field, the diagnostic identifies the missing tool-calling, image-input, or output-token-parameter capability and suggests a correction. Ambiguous rejections report that the capability could not be determined. Diagnostics do not repeat the endpoint's error body.
 
 `--output FILE` publishes the primary deliverable at that exact path while retaining the bundle. `--output DIRECTORY` publishes inside an existing directory using a unique generated filename with the validated format's extension. If the prompt explicitly names an output file, its basename is used inside that directory even when the model registers the artifact under another name. A path that does not yet exist is treated as a file path. Existing destination files remain unchanged unless `--overwrite` is supplied. Publication failure is nonzero and points to recoverable artifacts. If publication succeeds but final reporting fails, the published file remains. A report alone does not satisfy a requested binary deliverable.
 
@@ -171,3 +190,60 @@ uv build
 ```
 
 The installation tests build and install a wheel offline, reuse existing development dependencies, and invoke the installed command outside the repository. Run `uv sync` first to populate the build cache. Tests use mocked model transports or local fixtures; they do not qualify real-model quality. The [CI workflow](.github/workflows/ci.yml) schedules all six OS/Python combinations using the [official uv setup integration](https://docs.astral.sh/uv/guides/integration/github/). Native results and real-endpoint qualification must be reviewed separately before claiming release conformance.
+
+If a model response reaches its output-token limit (`finish_reason="length"`),
+the runner accounts for usage and exits with code 7 (`limit_exceeded`). It preserves
+partial artifacts and the failure report, leaves an unpublished destination unchanged,
+and neither dispatches returned tools nor retries that response. When the provider
+omits usage, returned public text and tool-call content (including truncated
+arguments) are charged using the documented UTF-8 estimate.
+
+
+### Optional image inspector and task acceptance checks
+
+A text-only executor can use a separate named image-capable profile through
+`image_inspector = "vision"` at the top level of the configuration. Define
+`[models.vision]` with the endpoint, model, credential environment reference,
+capacities, `input_modalities = ["text", "image"]`, and an explicitly supported
+`image_accounting` contract. The existing allowlisted PNG validator is still
+required. The `inspect_image` tool sends a validated PNG and a question to that
+profile, returning observations and image metadata to the executor. It cannot
+execute task commands or finish the parent run. Both models share the run's
+turn, token, tool-call and time limits; image bytes are omitted from logs.
+The executor receives the configured `storage.max_tool_output_bytes` PNG limit.
+It can use allowed commands to prepare a smaller preview or crop for inspection
+while preserving the original deliverable. The runner does not resize images;
+an oversized inspection request still stops with exit 7.
+
+Optional task acceptance checks reject a success proposal when the configured
+command returns nonzero. For example, on a host with this checker installed:
+
+```toml
+[acceptance]
+max_repairs = 2
+
+[acceptance.checks.deliverable]
+command = "/opt/checkers/check-deliverable"
+args = ["{path}"]
+```
+
+The checker command must also be in `policy.allowed_executables`. Configure its
+environment through the existing `policy.command_env` references. `{path}` is
+replaced with the path of an isolated copy of the primary candidate, or the
+proposed text report when there is no primary artifact. With acceptance enabled,
+a checked text report is retained as a primary artifact; `result.md` remains the
+separate diagnostic report. Arguments are passed
+directly, without shell evaluation. Checkers must inspect actual output and
+return useful bounded diagnostics; a model-written test summary is not evidence
+that tests ran. Provision checkers outside model-writable workspace roots.
+
+A rejected proposal returns findings to the model for correction. With acceptance
+checks configured, register one primary artifact and repair that file in place,
+reusing its artifact ID. A second primary registration is rejected before changing
+the registry; additional outputs can be registered as secondary. The default
+allows two repairs; another rejection ends the run with exit 6. These repairs
+use the existing run budgets and are distinct from transport retries. Passing
+checks bind to the final candidate digest: changing the primary bytes after
+acceptance prevents publication. Format validation remains required. Checks
+prove only the requirements they actually test, not unrestricted semantic quality.
+Without acceptance checks or an image inspector, existing behavior is preserved.

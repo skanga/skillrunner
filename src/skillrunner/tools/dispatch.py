@@ -11,8 +11,10 @@ from typing import Any, Literal
 from pydantic import BaseModel, ValidationError
 
 from skillrunner.domain.errors import RunnerError
+from skillrunner.model.media import MediaAttachment
 from skillrunner.model.protocol import ModelToolCall
 from skillrunner.runtime.budgets import Deadline, UsageLedger
+from skillrunner.tools.schemas import WriteFileArgs
 
 ToolKind = Literal["action", "activation", "completion"]
 Handler = Callable[[Any], Awaitable[Any]]
@@ -57,6 +59,8 @@ class ToolResult:
     value: Any = None
     error: dict[str, Any] | None = None
     _public: dict[str, Any] | None = field(default=None, repr=False, compare=False)
+
+    attachment: MediaAttachment | None = field(default=None, repr=False, compare=False)
 
     def as_dict(self) -> dict[str, Any]:
         if self._public is not None:
@@ -242,9 +246,20 @@ class ToolRegistry:
                     timeout_scope = asyncio.timeout(deadline.remaining)
                     async with timeout_scope:
                         value = await tool.handler(args)
-                    value = _normalize(value)
+                    attachment = value if isinstance(value, MediaAttachment) else None
+                    value = attachment.metadata() if attachment else _normalize(value)
                     _serialize(value)
-                    result = ToolResult(call.id, call.name, True, True, value)
+                    result = ToolResult(
+                        call.id, call.name, True, True, value, attachment=attachment
+                    )
+                    if attachment is not None:
+                        encoded = _serialize(result.as_dict()) + _serialize(
+                            {"role": "user", "content": attachment.content()}
+                        )
+                        if len(encoded.encode("utf-8")) > self.max_result_bytes:
+                            raise RunnerError(
+                                "budget_exhausted", "Encoded image exceeds tool output limit."
+                            )
                 except ValidationError as error:
                     # Locations, validator messages and input values can contain secrets.
                     details = {
@@ -253,6 +268,21 @@ class ToolRegistry:
                         "issues": [
                             {
                                 "type": item["type"],
+                                **(
+                                    {
+                                        "field": "expected_sha256",
+                                        "guidance": (
+                                            "Read the current file with read_text and copy its "
+                                            "full SHA-256 into expected_sha256. Use overwrite=true "
+                                            "only for intentional replacement."
+                                        ),
+                                    }
+                                    if not executed
+                                    and tool is not None
+                                    and tool.args_model is WriteFileArgs
+                                    and item["type"] == "overwrite_digest_required"
+                                    else {}
+                                ),
                                 **(
                                     {"field": item["loc"][0]}
                                     if item["loc"]

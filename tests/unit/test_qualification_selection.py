@@ -5,6 +5,8 @@ import importlib
 import json
 from pathlib import Path
 
+import pytest
+
 from skillrunner.model.protocol import ModelReply, ModelToolCall, ModelUsage
 
 
@@ -114,6 +116,30 @@ def test_frozen_selection_population_detects_label_or_prompt_drift(tmp_path):
         assert "drift" in str(error)
     else:
         raise AssertionError("Changed prompt must invalidate frozen selection labels")
+
+
+def test_refrozen_selection_set_keeps_full_population_requirement():
+    validate = api().validate_selection_set
+    cases = [{"id": str(index)} for index in range(22)]
+    selection = {
+        "set_id": "full-catalog-automatic-selection-v2",
+        "total_cases": 22,
+        "positive_cases": 21,
+        "no_match_cases": 1,
+    }
+    validate(selection, cases)
+
+    for invalid in (
+        {**selection, "set_id": "unrelated-v2"},
+        {**selection, "total_cases": 21},
+        {**selection, "no_match_cases": 0},
+    ):
+        try:
+            validate(invalid, cases)
+        except ValueError as error:
+            assert "incomplete" in str(error)
+        else:
+            raise AssertionError("Invalid frozen selection metadata must be rejected")
 
 
 async def test_selection_case_records_activated_skill_before_task_action(tmp_path):
@@ -264,3 +290,54 @@ def test_selection_summary_requires_complete_frozen_population_and_counts_false_
     assert summary["false_activations"] == 1
     assert summary["selection_gate_passed"] is False
     assert selected.summarize_selection(expected, runs[:1])["selection_gate_passed"] is False
+
+
+@pytest.mark.parametrize("no_match", [False, True])
+async def test_selection_uses_called_executor_when_unused_inspector_is_created_last(
+    tmp_path, no_match
+):
+    from tests.integration.test_coordinator import Adapter as CoordinatorAdapter
+    from tests.integration.test_coordinator import call, finish, fixture
+
+    settings = fixture(tmp_path)
+    profile = settings.models["test"].model_copy(
+        update={
+            "input_modalities": ["text", "image"],
+            "image_accounting": "gemma4-image-max-v1",
+        }
+    )
+    settings.models["test"] = profile
+    settings.models["vision"] = profile
+    settings.image_inspector = "vision"
+    adapters = []
+
+    def factory(selected, key):
+        calls = (
+            [finish("no_matching_skill")]
+            if no_match
+            else [
+                [call("activate_skill", {"name": "writer", "reason": "Matches task"})],
+                [call("inspect_image", {"path": "scratch/never.png", "question": "Inspect"})],
+            ]
+        )
+        adapter = CoordinatorAdapter(selected, calls)
+        adapters.append(adapter)
+        return adapter
+
+    result = await api().run_selection_case(
+        {
+            "id": "test",
+            "prompt": "Choose skills",
+            "inputs": [],
+            "format": "md",
+            "expected_skills": [] if no_match else ["writer"],
+        },
+        settings,
+        environ={},
+        adapter_factory=factory,
+    )
+    assert len(adapters) == 2 and all(a.closed for a in adapters)
+    assert adapters[0].requests and not adapters[1].requests
+    assert result["decision_reached"]
+    assert result["score"]["correct"]
+    assert result["intercepted_tool_names"] == ([] if no_match else ["inspect_image"])

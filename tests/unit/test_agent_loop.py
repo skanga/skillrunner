@@ -319,3 +319,97 @@ async def test_content_logging_redacts_serialized_history_without_changing_reque
     assert "public observation" in events
     assert "private reasoning marker" not in events
     assert "opaque credential marker" not in events
+
+
+@pytest.mark.parametrize("content", [None, "", "Partial answer"])
+@pytest.mark.parametrize("usage", [None, ModelUsage(100, 2000, 2100)])
+@pytest.mark.parametrize("calls", [(), reply().tool_calls])
+async def test_length_response_stops_after_accounting_without_dispatch(content, usage, calls):
+    response = ModelReply(content, calls, "length", usage, "request")
+    loop, adapter, context, ledger = setup([response])
+    with pytest.raises(RunnerError, match="output-token") as caught:
+        await loop.run()
+    assert caught.value.code == "budget_exhausted"
+    assert len(adapter.requests) == 1
+    assert ledger.charged_tool_calls == 0
+    assert len(ledger.records) == 1
+    assert ledger.records[0].quality == ("reported" if usage else "estimated")
+    if usage:
+        assert ledger.records[0].output_tokens == 2000
+    else:
+        assert 0 < ledger.records[0].output_tokens < 2000
+        assert ledger.records[0].output_tokens >= len((content or "").encode("utf-8"))
+    assert loop.last_reply == response
+
+
+def empty_completion_error():
+    from skillrunner.model.openai_compatible import _normalize
+
+    with pytest.raises(RunnerError) as exc:
+        _normalize(
+            {
+                "choices": [
+                    {"finish_reason": "stop", "message": {"role": "assistant", "content": None}}
+                ]
+            },
+            None,
+        )
+    return exc.value
+
+
+async def test_empty_retry_records_field_and_never_replays_tools():
+    loop, adapter, _, ledger = setup([reply("read_text"), empty_completion_error(), reply()])
+    events = []
+    loop.on_event = lambda name, payload: events.append((name, payload))
+    assert await loop.run() == {"report": "done"}
+    assert ledger.model_attempts == 3
+    assert ledger.charged_tool_calls == 2
+    assert adapter.requests[1] == adapter.requests[2]
+    failure = next(p for name, p in events if name == "model_request_failed")
+    assert failure["response_field"] == "completion_consistency"
+    assert failure["measurement_quality"] == "unknown"
+    assert ledger.records[1].output_tokens == 2000
+
+
+@pytest.mark.parametrize("retry_count,first_transport", [(0, False), (1, False), (1, True)])
+async def test_empty_retry_uses_single_shared_allowance(retry_count, first_transport):
+    first = (
+        RunnerError("model_transport_error", "Unavailable", details={"retryable": True})
+        if first_transport
+        else empty_completion_error()
+    )
+    loop, adapter, _, ledger = setup([first, empty_completion_error(), reply()])
+    loop.model_transport_retries = retry_count
+    with pytest.raises(RunnerError, match="model_protocol_error"):
+        await loop.run()
+    assert len(adapter.requests) == 1 + retry_count
+    assert ledger.charged_tool_calls == 0
+
+
+@pytest.mark.parametrize("limit", ["steps", "tokens"])
+async def test_empty_retry_cannot_exceed_budget(limit):
+    loop, adapter, context, ledger = setup(
+        [empty_completion_error(), reply()], steps=1 if limit == "steps" else 3
+    )
+    if limit == "tokens":
+        ledger.max_tokens = context.estimate([]) + loop.max_output
+    with pytest.raises(RunnerError, match="budget_exhausted"):
+        await loop.run()
+    assert len(adapter.requests) == 1
+    assert ledger.charged_tool_calls == 0
+
+
+async def test_empty_retry_respects_deadline(monkeypatch):
+    loop, adapter, _, ledger = setup([empty_completion_error(), reply()])
+    now = [asyncio.get_running_loop().time()]
+    loop.deadline = Deadline(5, clock=lambda: now[0])
+
+    async def expire_deadline(delay):
+        if delay > 0:
+            now[0] += 6.0
+
+    monkeypatch.setattr(api().asyncio, "sleep", expire_deadline)
+    with pytest.raises(RunnerError, match="budget_exhausted"):
+        await loop.run()
+    assert len(adapter.requests) == 1
+    assert ledger.charged_tool_calls == 0

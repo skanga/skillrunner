@@ -102,6 +102,47 @@ async def run(
     return receipt, adapters
 
 
+async def test_external_page_id_in_finish_proposal_can_be_corrected(tmp_path):
+    def corrected_finish(messages):
+        prior = json.loads(messages[-1]["content"])
+        assert prior["name"] == "finish_run"
+        assert prior["ok"] is False
+        assert prior["error"]["code"] == "artifact_invalid"
+        return [
+            call(
+                "finish_run",
+                {
+                    "outcome": "succeeded",
+                    "report": "Created page fixture-page-0001. Both pilots were reviewed.",
+                },
+                "3",
+            )
+        ]
+
+    receipt, adapters = await run(
+        tmp_path,
+        [
+            [call("activate_skill", {"name": "writer", "reason": "Write summary"}, "1")],
+            [
+                call(
+                    "finish_run",
+                    {
+                        "outcome": "succeeded",
+                        "report": "Created page fixture-page-0001. Both pilots were reviewed.",
+                        "primary_artifact_id": "fixture-page-0001",
+                    },
+                    "2",
+                )
+            ],
+            corrected_finish,
+        ],
+    )
+    assert receipt["status"] == "succeeded"
+    assert receipt["primary_output"] is not None
+    assert "fixture-page-0001" in Path(receipt["primary_output"]).read_text()
+    assert len(adapters[0].requests) == 3
+
+
 async def test_no_catalog_finishes_locally_with_durable_failure(tmp_path):
     receipt, adapters = await run(tmp_path, [], skills=(), skill_exists=False)
     assert receipt["status"] == "no_matching_skill"
@@ -123,6 +164,14 @@ async def test_command_schema_names_exact_generated_output_roots(tmp_path):
     assert str(root / "work/scratch") in description
     assert str(root / "artifacts") in description
     assert str(root / "work/artifacts") not in description
+    argv_description = schema["properties"]["argv"]["description"]
+    assert "Arguments after the executable, one array item per OS argument." in argv_description
+    assert "Do not repeat the executable in argv" in argv_description
+    assert "does not split strings or evaluate shell syntax" in argv_description
+    assert '["-c", "print(1)"]' in argv_description
+    assert 'already allowlisted shell and pass ["-c", "command text"]' in argv_description
+    assert str(root / "work/scratch") in argv_description
+    assert str(root / "artifacts") in argv_description
 
 
 async def test_blank_text_completion_without_an_artifact_is_not_success(tmp_path):
@@ -807,6 +856,38 @@ async def test_exhausted_turn_budget_preserves_completed_artifact_work(tmp_path)
     assert Path(receipt["artifact_paths"][0]).read_text() == "generated output"
 
 
+async def test_artifact_storage_exhaustion_preserves_existing_publication_and_report(tmp_path):
+    fixture(tmp_path)
+    config = tmp_path / "skillrun.toml"
+    config.write_text(config.read_text() + "\n[storage]\nmax_artifact_bytes = 1\n")
+    settings = resolve_settings(tmp_path, {}, {})
+    output = tmp_path / "published.txt"
+    output.write_text("previous output")
+
+    receipt = await api().run_task(
+        RunRequest(
+            prompt="Write a report",
+            invocation_directory=tmp_path,
+            required_skills=["writer"],
+            output=output,
+            overwrite=True,
+        ),
+        settings,
+        environ={},
+        adapter_factory=lambda profile, key: Adapter(profile, [*artifact_calls(), finish()]),
+    )
+
+    assert receipt["status"] == "limit_exceeded"
+    assert receipt["exit_code"] != 0
+    assert receipt["errors"][0]["code"] == "budget_exhausted"
+    assert output.read_text() == "previous output"
+    assert Path(receipt["report_path"]).is_file()
+    manifest = json.loads(Path(receipt["manifest_path"]).read_text())
+    assert manifest["lifecycle"]["status"] == "limit_exceeded"
+    assert manifest["lifecycle"]["cleanup"]["work_retained"] is True
+    assert (Path(receipt["manifest_path"]).parent / "work").is_dir()
+
+
 async def test_input_snapshots_have_distinct_logical_roots(tmp_path):
     settings = fixture(tmp_path)
     sources = []
@@ -923,6 +1004,14 @@ async def test_real_command_and_configured_external_validator(tmp_path):
     manifest = json.loads(Path(receipt["manifest_path"]).read_text())
     assert manifest["outputs"]["artifacts"][0]["validation_level"] == "external"
     assert manifest["outputs"]["artifacts"][0]["validator"]["command"] == executable
+    runtimes = manifest["provenance"].get("external_runtimes", [])
+    assert len(runtimes) == 1  # Task and validator share the same executable identity.
+    assert runtimes[0]["family"] == "python"
+    assert runtimes[0]["outcome"] == "detected"
+    assert runtimes[0]["executable"] == executable
+    events = (Path(receipt["manifest_path"]).parent / "events.jsonl").read_text()
+    assert "runtime_provenance_started" in events
+    assert "runtime_provenance_stopped" in events
 
 
 @pytest.mark.parametrize("expanded_bytes", [100, 101])
@@ -999,7 +1088,8 @@ async def test_archive_expansion_limit_controls_publication_and_partial_retentio
         assert sum(len(archive.read(name)) for name in archive.namelist()) == expanded_bytes
     events = [json.loads(line) for line in (root / "events.jsonl").read_text().splitlines()]
     names = [event["event_type"] for event in events]
-    assert names.count("process_stopped") == 1
+    assert names.count("process_stopped") == 2  # Runtime probe and task command.
+    assert names.count("runtime_provenance_stopped") == 1
     if expanded_bytes == 100:
         assert receipt["status"] == "succeeded" and receipt["exit_code"] == 0
         assert output.read_bytes() == retained.read_bytes()
@@ -1091,7 +1181,9 @@ async def test_publication_events_record_actual_commit_state(tmp_path, monkeypat
     )
 
 
-async def test_post_publication_reporting_failure_keeps_output(tmp_path, monkeypatch):
+@pytest.mark.parametrize("failed_file", ["manifest", "report"])
+async def test_post_publication_reporting_failure_keeps_output(tmp_path, monkeypatch, failed_file):
+    from skillrunner.recording import bundle as bundle_module
     from skillrunner.recording.bundle import RunBundle
 
     original = RunBundle.save
@@ -1101,13 +1193,24 @@ async def test_post_publication_reporting_failure_keeps_output(tmp_path, monkeyp
             raise OSError("Cannot save report state")
         return original(bundle)
 
-    monkeypatch.setattr(RunBundle, "save", fail_final)
     output = tmp_path / "published.md"
+    original_write = bundle_module.atomic_write
+
+    def fail_report(path, content):
+        if path.name == "result.md" and output.exists():
+            raise OSError("Cannot write final report")
+        return original_write(path, content)
+
+    if failed_file == "manifest":
+        monkeypatch.setattr(RunBundle, "save", fail_final)
+    else:
+        monkeypatch.setattr(bundle_module, "atomic_write", fail_report)
     receipt, _ = await run(tmp_path, [finish()], output=output)
     assert receipt["status"] == "failed"
     assert receipt["primary_output"] == str(output)
     assert output.read_text() == "Completed answer."
     assert receipt["errors"][-1]["code"] == "post_publication_reporting_failed"
+    assert receipt["exit_code"] != 0
 
 
 @pytest.mark.parametrize("competing", [False, True])
@@ -1444,3 +1547,735 @@ async def test_model_receives_absolute_workspace_and_safe_file_contract(tmp_path
     assert "scratch/answer.md" in instructions
     manifest = json.loads(Path(receipt["manifest_path"]).read_text())
     assert len(manifest["controls"]["policy_digest"]) == 64
+
+
+@pytest.mark.parametrize(
+    "mode", ["enabled", "off", "missing_validator", "mutating_validator", "invalid", "oversize"]
+)
+@pytest.mark.parametrize("contract", ["openai-patch-high-v1", "gemma4-image-max-v1"])
+async def test_png_media_uses_validated_copy_and_metadata_only_logs(tmp_path, mode, contract):
+    import base64
+    import struct
+    import sys
+    import zlib
+
+    def chunk(kind, data):
+        return (
+            struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+        )
+
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(b"\x00\xff\x00\x00"))
+        + chunk(b"IEND", b"")
+    )
+    source = tmp_path / "page.png"
+    source.write_bytes(png if mode != "invalid" else b"invalid PNG")
+    original = source.read_bytes()
+    fixture(tmp_path)
+    config = tmp_path / "skillrun.toml"
+    text = config.read_text().replace(
+        "[limits]",
+        (
+            f'image_accounting = "{contract}"\ninput_modalities = ["text", "image"]\n'
+            if mode != "off"
+            else ""
+        )
+        + "[limits]",
+    )
+    validator = tmp_path / "validate.py"
+    validator.write_text(
+        "import pathlib,sys,zlib,struct\n"
+        "p=pathlib.Path(sys.argv[1]); b=p.read_bytes()\n"
+        "assert b[:8]==b'\\x89PNG\\r\\n\\x1a\\n'\n"
+        "pos=8; pixels=b''\n"
+        "while pos<len(b):\n"
+        " n=struct.unpack('>I',b[pos:pos+4])[0];k=b[pos+4:pos+8];v=b[pos+8:pos+8+n]\n"
+        " crc=struct.unpack('>I',b[pos+8+n:pos+12+n])[0];assert crc==zlib.crc32(k+v)\n"
+        " if k==b'IDAT': pixels+=v\n"
+        " pos+=12+n\n"
+        "assert zlib.decompress(pixels)==b'\\x00\\xff\\x00\\x00'\n"
+        + ("p.write_bytes(b'changed')\n" if mode == "mutating_validator" else "")
+    )
+    text += (
+        "\n[policy]\nallowed_executables = ["
+        + json.dumps(sys.executable)
+        + "]\n[diagnostics]\nlog_content = true\n"
+    )
+    if mode != "missing_validator":
+        text += (
+            "\n[artifacts.validators.png]\ncommand = "
+            + json.dumps(sys.executable)
+            + "\nargs = ["
+            + json.dumps(str(validator))
+            + ', "{path}"]\n'
+        )
+    if mode == "oversize":
+        text += "\n[storage]\nmax_tool_output_bytes = 400\n"
+    config.write_text(text)
+    settings = resolve_settings(tmp_path, {}, {})
+    adapters = []
+
+    def factory(profile, key):
+        adapter = Adapter(
+            profile,
+            [
+                [call("read_media", {"path": "input-1/page.png", "representation": "image"})],
+                finish(),
+            ],
+        )
+        adapters.append(adapter)
+        return adapter
+
+    receipt = await api().run_task(
+        RunRequest(
+            prompt="Read image",
+            invocation_directory=tmp_path,
+            required_skills=["writer"],
+            inputs=[source],
+        ),
+        settings,
+        environ={},
+        adapter_factory=factory,
+    )
+    assert source.read_bytes() == original
+    messages = adapters[0].requests
+    if mode == "enabled":
+        metadata = json.loads(messages[1][-1]["content"][0]["text"].split("(data): ", 1)[1])
+        assert metadata["image_accounting"] == contract
+        assert metadata["image_token_estimate"] == (
+            1122 if contract == "gemma4-image-max-v1" else 3
+        )
+        assert (
+            messages[1][-1]["content"][1]["image_url"]["url"]
+            == "data:image/png;base64," + base64.b64encode(png).decode()
+        )
+        assert receipt["exit_code"] == 0
+    elif mode == "oversize":
+        assert receipt["exit_code"] != 0
+        assert len(messages) == 1
+    else:
+        result = json.loads(messages[1][-1]["content"])
+        assert not result["ok"]
+        assert result["error"]["code"] in ("unsupported_capability", "artifact_invalid")
+    root = Path(receipt["manifest_path"]).parent
+    logs = "".join(
+        f.read_text() for f in (root / "events.jsonl", root / "run.json", root / "result.md")
+    )
+    assert base64.b64encode(png).decode() not in logs
+    assert not list(root.glob("work/staging/media-*"))
+
+
+async def test_output_length_exits_seven_preserving_partial_and_existing_output(tmp_path):
+    settings = fixture(tmp_path)
+    output = tmp_path / "published.txt"
+    output.write_text("previous output")
+
+    class LengthAdapter(Adapter):
+        async def complete(self, messages, tool_schemas, output_limit, request_deadline):
+            if self.requests:
+                self.requests.append(messages)
+                return ModelReply(
+                    "Incomplete", tuple(finish()[0:1]), "length", ModelUsage(100, 4000, 4100), None
+                )
+            return await super().complete(messages, tool_schemas, output_limit, request_deadline)
+
+    adapter = LengthAdapter(settings.models["test"], [artifact_calls()[0]])
+    receipt = await api().run_task(
+        RunRequest(
+            prompt="Write",
+            invocation_directory=tmp_path,
+            required_skills=["writer"],
+            output=output,
+            overwrite=True,
+        ),
+        settings,
+        environ={},
+        adapter_factory=lambda profile, key: adapter,
+    )
+    assert receipt["exit_code"] == 7
+    assert receipt["status"] == "limit_exceeded"
+    assert receipt["errors"][0]["code"] == "budget_exhausted"
+    assert "output-token" in receipt["errors"][0]["message"]
+    assert len(adapter.requests) == 2
+    assert output.read_text() == "previous output"
+    assert Path(receipt["artifact_paths"][0]).read_text() == "generated output"
+    assert Path(receipt["report_path"]).is_file()
+    manifest = json.loads(Path(receipt["manifest_path"]).read_text())
+    assert manifest["lifecycle"]["status"] == "limit_exceeded"
+    events = [
+        json.loads(line)
+        for line in (Path(receipt["manifest_path"]).parent / "events.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    completed = [
+        event["payload"] for event in events if event["event_type"] == "model_request_completed"
+    ]
+    assert completed[-1]["finish_reason"] == "length"
+    assert completed[-1]["output_tokens"] == 4000
+    assert completed[-1]["measurement_quality"] == "reported"
+    assert not any(
+        event["event_type"] == "tool_started" and event["payload"].get("name") == "finish_run"
+        for event in events
+    )
+
+
+@pytest.mark.parametrize("names", [[], ["writer"], ["writer", "internal-comms", "中文"]])
+async def test_activation_schema_exposes_only_valid_catalog_names(tmp_path, monkeypatch, names):
+    from skillrunner.tools.schemas import ActivateSkillArgs
+
+    settings = fixture(tmp_path, skill=False)
+    for name in [*names, "rejected"]:
+        package = tmp_path / "skills" / name
+        package.mkdir(parents=True)
+        declared = name if name != "rejected" else "wrong-name"
+        (package / "SKILL.md").write_text(
+            f"---\nname: {declared}\ndescription: Write reports.\n---\nWrite clearly.",
+            encoding="utf-8",
+        )
+    captured = []
+    original = api().Coordinator._bind_tools
+
+    def bind(coordinator):
+        original(coordinator)
+        captured.extend(coordinator.tools.model_schemas())
+
+    monkeypatch.setattr(api().Coordinator, "_bind_tools", bind)
+    adapters = []
+
+    def factory(profile, key):
+        adapter = Adapter(profile, [finish("no_matching_skill")])
+        adapters.append(adapter)
+        return adapter
+
+    await api().run_task(
+        RunRequest(prompt="Write a report", invocation_directory=tmp_path),
+        settings,
+        environ={},
+        adapter_factory=factory,
+    )
+    if not names:
+        assert not captured
+        assert not adapters
+        return
+    schema = next(
+        x["function"]["parameters"] for x in captured if x["function"]["name"] == "activate_skill"
+    )
+    assert schema["properties"]["name"].get("enum") == (sorted(names) or None)
+    if names:
+        advertised = next(
+            x["function"]["parameters"]
+            for x in adapters[0].tool_schemas[0]
+            if x["function"]["name"] == "activate_skill"
+        )
+        assert advertised == schema
+        schema["properties"]["name"]["enum"].append("mutated")
+        assert advertised["properties"]["name"]["enum"] == sorted(names)
+    assert "enum" not in ActivateSkillArgs.model_json_schema()["properties"]["name"]
+
+
+async def test_activation_does_not_correct_misspelled_catalog_name(tmp_path):
+    def after_rejection(messages):
+        result = json.loads(messages[-1]["content"])
+        assert result["ok"] is False
+        return finish("no_matching_skill")
+
+    receipt, _ = await run(
+        tmp_path,
+        [[call("activate_skill", {"name": "Writer", "reason": "Write"})], after_rejection],
+        skills=(),
+    )
+    assert receipt["status"] == "no_matching_skill"
+    manifest = json.loads(Path(receipt["manifest_path"]).read_text())
+    assert not manifest["provenance"]["activated_skills"]
+
+
+@pytest.mark.parametrize("discovered", [False, True])
+async def test_resolved_response_cap_visible_before_first_request(tmp_path, discovered):
+    settings = fixture(tmp_path)
+    settings.models["test"].api_key_env = "PRIVATE_KEY"
+    settings.models["test"].auth_mode = "bearer"
+    if discovered:
+        settings.models["test"].max_output_tokens = None
+
+    class DiscoveringAdapter(Adapter):
+        async def discover_capabilities(self, deadline):
+            result = await super().discover_capabilities(deadline)
+            result.profile = self.profile.model_copy(update={"max_output_tokens": 2345})
+            return result
+
+    observed = []
+
+    def inspect(messages):
+        resources = json.loads(messages[2]["content"].split("\n", 1)[1])
+        assert resources["model_capacity"]["max_output_tokens"] == (2345 if discovered else 4000)
+        assert "PRIVATE-CREDENTIAL" not in json.dumps(messages)
+        assert "including tool arguments" in messages[0]["content"]
+        assert "Use precise prose." in json.dumps(messages)
+        observed.append(True)
+        return finish()
+
+    receipt = await api().run_task(
+        RunRequest(
+            prompt="Write an answer", invocation_directory=tmp_path, required_skills=["writer"]
+        ),
+        settings,
+        environ={"PRIVATE_KEY": "PRIVATE-CREDENTIAL"},
+        adapter_factory=lambda profile, key: (DiscoveringAdapter if discovered else Adapter)(
+            profile, [inspect]
+        ),
+    )
+    assert receipt["status"] == "succeeded", receipt["errors"]
+    assert observed == [True]
+
+
+async def test_smaller_writes_assembled_with_allowed_command_publish_validated_output(tmp_path):
+    import sys
+
+    executable = str(Path(sys.executable).resolve())
+    fixture(tmp_path)
+    config = tmp_path / "skillrun.toml"
+    config.write_text(
+        config.read_text() + "\n[policy]\nallowed_executables = [" + json.dumps(executable) + "]\n"
+    )
+    settings = resolve_settings(tmp_path, {}, {})
+
+    def assemble(messages):
+        capabilities = json.loads(
+            messages[0]["content"].split("Run capabilities and requirements:\n", 1)[1]
+        )
+        scratch = capabilities["generated_roots"]["scratch"]
+        return [
+            call(
+                "run_command",
+                {
+                    "executable": executable,
+                    "cwd": scratch,
+                    "argv": [
+                        "-c",
+                        (
+                            "from pathlib import Path; "
+                            "Path('report.md').write_text("
+                            "Path('part1.txt').read_text() + Path('part2.txt').read_text())"
+                        ),
+                    ],
+                },
+            )
+        ]
+
+    calls = [
+        [call("write_file", {"path": "scratch/part1.txt", "content": "# Report\n"})],
+        [call("write_file", {"path": "scratch/part2.txt", "content": "Complete deliverable.\n"})],
+        assemble,
+        artifact_calls()[1],
+        finish(),
+    ]
+    output = tmp_path / "published.md"
+    receipt = await api().run_task(
+        RunRequest(
+            prompt="Write a report",
+            invocation_directory=tmp_path,
+            required_skills=["writer"],
+            output=output,
+        ),
+        settings,
+        environ={},
+        adapter_factory=lambda profile, key: Adapter(profile, calls),
+    )
+    assert receipt["status"] == "succeeded", receipt["errors"]
+    assert output.read_text() == "# Report\nComplete deliverable.\n"
+    manifest = json.loads(Path(receipt["manifest_path"]).read_text())
+    assert manifest["outputs"]["artifacts"][0]["status"] == "validated"
+    events = [
+        json.loads(line)
+        for line in (Path(receipt["manifest_path"]).parent / "events.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    assert not [event for event in events if event["event_type"] == "tool_failed"]
+
+
+async def test_named_image_inspector_keeps_png_out_of_executor_context(tmp_path, monkeypatch):
+    from skillrunner.model.media import MediaAttachment
+
+    fixture(tmp_path)
+    config = tmp_path / "skillrun.toml"
+    config.write_text(
+        'image_inspector = "vision"\n'
+        + config.read_text()
+        + """
+[models.vision]
+base_url = "http://vision.invalid/v1"
+model = "vision"
+api_key_env = "VISION_KEY"
+context_window_tokens = 16000
+max_output_tokens = 1000
+input_modalities = ["text", "image"]
+image_accounting = "gemma4-image-max-v1"
+[diagnostics]
+log_content = true
+"""
+    )
+    settings = resolve_settings(tmp_path, {}, {})
+    settings.storage.max_tool_output_bytes = 123456
+    attachment = MediaAttachment(
+        b"validated-private-image", "scratch/page.png", 10, 10, "gemma4-image-max-v1"
+    )
+
+    async def validated_read(*args, **kwargs):
+        assert kwargs["profile"].model == "vision"
+        return attachment
+
+    monkeypatch.setattr(api(), "read_png", validated_read)
+    adapters = {}
+
+    def checked_finish(messages):
+        assert "data:image/png;base64," not in json.dumps(messages)
+        result = json.loads(messages[-1]["content"])
+        assert result["value"]["report"] == "Title visible."
+        return finish()
+
+    def factory(profile, key):
+        if profile.model == "vision":
+            assert key.get_secret_value() == "private-vision-key"
+            replies = [[call("finish_run", {"report": "Title visible."})]]
+        else:
+            replies = [
+                [call("inspect_image", {"path": "scratch/page.png", "question": "Read title"})],
+                checked_finish,
+            ]
+        adapter = Adapter(profile, replies)
+        adapters[profile.model] = adapter
+        return adapter
+
+    receipt = await api().run_task(
+        RunRequest(
+            prompt="Inspect title", invocation_directory=tmp_path, required_skills=["writer"]
+        ),
+        settings,
+        environ={"VISION_KEY": "private-vision-key"},
+        adapter_factory=factory,
+    )
+    assert receipt["exit_code"] == 0
+    executor = adapters["arbitrary"]
+    assert "123456 bytes" in json.dumps(executor.requests[0])
+    inspect_schema = next(
+        tool["function"]
+        for tool in executor.tool_schemas[0]
+        if tool["function"]["name"] == "inspect_image"
+    )
+    assert "123456 bytes" in inspect_schema["description"]
+    assert all(a.closed for a in adapters.values())
+    assert "data:image/png;base64," in json.dumps(adapters["vision"].requests)
+    root = Path(receipt["manifest_path"]).parent
+    manifest = json.loads((root / "run.json").read_text())
+    assert manifest["model"]["image_inspector"]["model"] == "vision"
+    logs = (root / "events.jsonl").read_text()
+    assert "private-vision-key" not in logs and "data:image/png;base64," not in logs
+    assert "image_inspector" in logs
+
+
+def test_image_inspector_alias_must_exist(tmp_path):
+    fixture(tmp_path)
+    config = tmp_path / "skillrun.toml"
+    config.write_text('image_inspector = "absent"\n' + config.read_text())
+    from skillrunner.domain.errors import RunnerError
+
+    with pytest.raises(RunnerError):
+        resolve_settings(tmp_path, {}, {})
+
+
+@pytest.mark.parametrize("repair", [True, False])
+@pytest.mark.parametrize("redact_report", [False, True])
+async def test_acceptance_checks_reject_success_allow_bounded_repair(
+    tmp_path, repair, redact_report
+):
+    import sys
+
+    fixture(tmp_path)
+    config = tmp_path / "skillrun.toml"
+    checker = (
+        "import pathlib,sys; v=pathlib.Path(sys.argv[1]).read_text(); "
+        "print('Expected approved content'); sys.exit(0 if v == 'approved' else 1)"
+    )
+    config.write_text(
+        config.read_text()
+        + "\n[policy]\nallowed_executables = ["
+        + json.dumps(sys.executable)
+        + "]\n[acceptance]\nmax_repairs = 1\n"
+        + "[acceptance.checks.content]\ncommand = "
+        + json.dumps(sys.executable)
+        + '\nargs = ["-c", '
+        + json.dumps(checker)
+        + ', "{path}"]\n'
+    )
+    if redact_report:
+        config.write_text(config.read_text() + '\n[diagnostics]\nredact_env = ["TASK_SECRET"]\n')
+    environment = {"TASK_SECRET": "approved"} if redact_report else {}
+    settings = resolve_settings(tmp_path, {}, environment)
+
+    def after_rejection(messages):
+        result = json.loads(messages[-1]["content"])
+        assert not result["ok"]
+        assert result["error"]["code"] == "acceptance_rejected"
+        assert "Expected approved content" in json.dumps(result)
+        return [
+            call(
+                "finish_run",
+                {"outcome": "succeeded", "report": "approved" if repair else "bad"},
+                "retry",
+            )
+        ]
+
+    adapter = Adapter(settings.models["test"], [])
+    adapter.calls = iter(
+        [[call("finish_run", {"outcome": "succeeded", "report": "bad"})], after_rejection]
+    )
+    receipt = await api().run_task(
+        RunRequest(
+            prompt="Return approved", invocation_directory=tmp_path, required_skills=["writer"]
+        ),
+        settings,
+        environ=environment,
+        adapter_factory=lambda profile, key: adapter,
+    )
+    assert receipt["exit_code"] == (0 if repair else 6)
+    if not repair:
+        assert receipt["errors"][0]["code"] == "acceptance_failed"
+    manifest = json.loads(Path(receipt["manifest_path"]).read_text())
+    assert len(manifest["acceptance"]["attempts"]) == 2
+    assert manifest["acceptance"]["attempts"][-1]["passed"] is repair
+    if repair:
+        import hashlib
+
+        published = Path(receipt["primary_output"]).read_bytes()
+        assert published == b"approved"
+        if redact_report:
+            assert "[REDACTED]" in Path(receipt["report_path"]).read_text()
+        assert (
+            hashlib.sha256(published).hexdigest()
+            == manifest["acceptance"]["attempts"][-1]["sha256"]
+        )
+
+
+@pytest.mark.parametrize("change_after_acceptance", [False, True])
+@pytest.mark.parametrize("try_second_primary", [False, True])
+async def test_acceptance_artifact_repair_and_final_digest(
+    tmp_path, monkeypatch, change_after_acceptance, try_second_primary
+):
+    import hashlib
+    import sys
+
+    fixture(tmp_path)
+    config = tmp_path / "skillrun.toml"
+    checker = (
+        "import pathlib,sys; "
+        "sys.exit(0 if pathlib.Path(sys.argv[1]).read_text() == 'approved' else 1)"
+    )
+    config.write_text(
+        config.read_text()
+        + "\n[policy]\nallowed_executables = ["
+        + json.dumps(sys.executable)
+        + "]\n[acceptance.checks.content]\ncommand = "
+        + json.dumps(sys.executable)
+        + '\nargs = ["-c", '
+        + json.dumps(checker)
+        + ', "{path}"]\n'
+    )
+    settings = resolve_settings(tmp_path, {}, {})
+    identifier = None
+
+    def first_finish(messages):
+        nonlocal identifier
+        identifier = json.loads(messages[-1]["content"])["value"]["id"]
+        return finish(primary_artifact_id=identifier)
+
+    def repair(messages):
+        assert json.loads(messages[-1]["content"])["error"]["code"] == "acceptance_rejected"
+        if try_second_primary:
+            return [call("write_file", {"path": "scratch/replacement.md", "content": "approved"})]
+        return repair_original(messages)
+
+    def reject_second_primary(messages):
+        assert json.loads(messages[-1]["content"])["error"]["code"] == "artifact_invalid"
+        return repair_original(messages)
+
+    def repair_original(messages):
+        return [
+            call(
+                "write_file",
+                {
+                    "path": "scratch/result.md",
+                    "content": "approved",
+                    "overwrite": True,
+                    "expected_sha256": hashlib.sha256(b"bad").hexdigest(),
+                },
+            )
+        ]
+
+    def final_finish(messages):
+        return finish(primary_artifact_id=identifier)
+
+    adapter = Adapter(
+        settings.models["test"],
+        [
+            [call("write_file", {"path": "scratch/result.md", "content": "bad"})],
+            [
+                call(
+                    "register_artifact",
+                    {
+                        "path": "scratch/result.md",
+                        "format": "md",
+                        "role": "primary",
+                        "description": "Result",
+                    },
+                )
+            ],
+            first_finish,
+            repair,
+            *(
+                [
+                    [
+                        call(
+                            "register_artifact",
+                            {
+                                "path": "scratch/replacement.md",
+                                "format": "md",
+                                "role": "primary",
+                                "description": "Replacement",
+                            },
+                        )
+                    ],
+                    reject_second_primary,
+                ]
+                if try_second_primary
+                else []
+            ),
+            final_finish,
+        ],
+    )
+    if change_after_acceptance:
+        original = api().Coordinator.complete
+
+        async def changed(self):
+            self.registry.records[0].path.write_text("different")
+            await original(self)
+
+        monkeypatch.setattr(api().Coordinator, "complete", changed)
+    output = tmp_path / "published.md"
+    receipt = await api().run_task(
+        RunRequest(
+            prompt="Write approved",
+            invocation_directory=tmp_path,
+            required_skills=["writer"],
+            output=output,
+        ),
+        settings,
+        environ={},
+        adapter_factory=lambda profile, key: adapter,
+    )
+    if change_after_acceptance:
+        assert receipt["exit_code"] == 6
+        assert receipt["errors"][0]["code"] == "acceptance_failed"
+        assert not output.exists()
+    else:
+        assert receipt["exit_code"] == 0
+        assert output.read_text() == "approved"
+
+
+async def test_acceptance_timeout_cannot_finish_success_and_cleans_up(tmp_path):
+    import sys
+
+    fixture(tmp_path)
+    config = tmp_path / "skillrun.toml"
+    checker = "import time; time.sleep(60)"
+    config.write_text(
+        config.read_text()
+        + "\n[policy]\nallowed_executables = ["
+        + json.dumps(sys.executable)
+        + "]\n[acceptance.checks.slow]\ncommand = "
+        + json.dumps(sys.executable)
+        + '\nargs = ["-c", '
+        + json.dumps(checker)
+        + ', "{path}"]\n'
+    )
+    settings = resolve_settings(tmp_path, {"timeout": "1s"}, {})
+    adapter = Adapter(settings.models["test"], [finish()])
+    receipt = await api().run_task(
+        RunRequest(
+            prompt="Return a report", invocation_directory=tmp_path, required_skills=["writer"]
+        ),
+        settings,
+        environ={},
+        adapter_factory=lambda profile, key: adapter,
+    )
+    assert receipt["exit_code"] == 7
+    root = Path(receipt["manifest_path"]).parent
+    events = [json.loads(line) for line in (root / "events.jsonl").read_text().splitlines()]
+    assert any(e["event_type"] == "process_stopped" for e in events)
+    assert not any(
+        e["event_type"] == "acceptance_check_completed" and e["payload"]["passed"] for e in events
+    )
+    assert not list(root.glob("work/staging/acceptance-*"))
+    assert adapter.closed
+
+
+async def test_acceptance_checker_storage_is_checked_before_snapshot_cleanup(tmp_path):
+    import sys
+
+    fixture(tmp_path)
+    config = tmp_path / "skillrun.toml"
+    checker = "import pathlib; pathlib.Path('excess').write_bytes(b'x' * 2000000)"
+    config.write_text(
+        config.read_text()
+        + "\n[policy]\nallowed_executables = ["
+        + json.dumps(sys.executable)
+        + "]\n[storage]\nmax_scratch_bytes = 1000000\n"
+        + "[acceptance.checks.storage]\ncommand = "
+        + json.dumps(sys.executable)
+        + '\nargs = ["-c", '
+        + json.dumps(checker)
+        + ', "{path}"]\n'
+    )
+    settings = resolve_settings(tmp_path, {}, {})
+    adapter = Adapter(settings.models["test"], [finish()])
+    receipt = await api().run_task(
+        RunRequest(
+            prompt="Return a report", invocation_directory=tmp_path, required_skills=["writer"]
+        ),
+        settings,
+        environ={},
+        adapter_factory=lambda profile, key: adapter,
+    )
+    assert receipt["exit_code"] == 7
+    assert receipt["errors"][0]["code"] == "budget_exhausted"
+    assert adapter.closed
+
+
+@pytest.mark.parametrize("required", [True, False])
+async def test_minimum_set_guidance_reaches_model_and_preserves_activation(tmp_path, required):
+    calls = (
+        []
+        if required
+        else [[call("activate_skill", {"name": "writer", "reason": "Write the requested report"})]]
+    )
+    receipt, adapters = await run(
+        tmp_path, [*calls, finish()], skills=("writer",) if required else ()
+    )
+    assert receipt["status"] == "succeeded"
+    requests = adapters[0].requests
+    assert len(requests) == (1 if required else 2)
+    for messages in requests:
+        instructions = " ".join(messages[0]["content"].split())
+        assert (
+            "For each additional skill, identify a requested operation or constraint"
+            in instructions
+        )
+        assert (
+            "Audience or document genre alone does not establish a separate workflow."
+            in instructions
+        )
+    manifest = json.loads(Path(receipt["manifest_path"]).read_text())
+    assert [skill["name"] for skill in manifest["provenance"]["activated_skills"]] == ["writer"]
