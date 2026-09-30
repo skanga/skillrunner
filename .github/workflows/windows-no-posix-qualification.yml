@@ -26,10 +26,14 @@ jobs:
           if ($LASTEXITCODE) { throw 'Dependency installation failed' }
           node --version
           if ($LASTEXITCODE) { throw 'Node.js is required; no skipped Node qualification' }
+      - name: Record initial shell and Windows launcher metadata
+        run: ./scripts/record_shell_diagnostics.ps1 -Phase initial
       - name: Inventory and remove POSIX shell executables
         run: ./scripts/qualify_no_posix.ps1 -RemoveShells
       - name: Independently verify shell absence before tests
         run: ./scripts/qualify_no_posix.ps1
+      - name: Record shell metadata immediately before tests
+        run: ./scripts/record_shell_diagnostics.ps1 -Phase pre-test
       - name: Run native no-shell runtime contracts
         run: |
           uv run --locked --offline pytest -q tests/integration/test_windows_runtime_acceptance.py --junitxml="$env:RUNNER_TEMP/no-posix-evidence/tests.xml"
@@ -41,6 +45,9 @@ jobs:
           if ($LASTEXITCODE) { throw 'CLI smoke check failed' }
       - name: Verify shell absence after tests
         run: ./scripts/qualify_no_posix.ps1
+      - name: Record final shell and Windows launcher metadata
+        if: always()
+        run: ./scripts/record_shell_diagnostics.ps1 -Phase final
       - name: Retain host inventory and test results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
