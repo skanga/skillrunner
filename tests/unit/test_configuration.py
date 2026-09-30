@@ -371,3 +371,50 @@ def test_child_and_mcp_secret_fields_accept_only_references(api, tmp_path, secti
     with pytest.raises(ValueError, match="invalid_configuration") as error:
         api.resolve_settings(tmp_path, {}, {})
     assert "private-token" not in str(error.value)
+
+
+@pytest.mark.parametrize("origin", ["file", "env", "cli"])
+def test_endpoint_sources_preserve_prefix_and_obey_precedence(api, tmp_path, origin):
+    endpoints = {
+        "file": "https://configured.invalid/team/v1",
+        "env": "https://environment.invalid/proxy/v1",
+        "cli": "https://command.invalid/custom/v1",
+    }
+    write_config(
+        tmp_path / "skillrun.toml",
+        'default_model="selected"\n[models.selected]\n'
+        f'base_url="{endpoints["file"]}"\nmodel="literal-model"\nauth_mode="none"\n'
+        '[direct_model]\nauth_mode="none"\n',
+    )
+    overrides = {"model": "literal-model"} if origin != "file" else {}
+    environ = {"OPENAI_BASE_URL": endpoints["env"]} if origin != "file" else {}
+    if origin == "cli":
+        overrides["base_url"] = endpoints["cli"]
+    settings = api.resolve_settings(tmp_path, overrides, environ)
+    profile = api.select_model(settings)
+    assert profile.base_url == endpoints[origin]
+    assert profile.model == "literal-model"
+    assert profile.auth_mode == "none"
+    key = "models.selected.base_url" if origin == "file" else "base_url"
+    assert settings.sources[key] == origin
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_unreadable_selected_config_returns_invalid_request(api, tmp_path, monkeypatch, explicit):
+    from skillrunner.domain.errors import RunnerError
+
+    selected = write_config(tmp_path / ("chosen.toml" if explicit else "skillrun.toml"), "")
+    original_open = type(selected).open
+
+    def denied_open(path, *args, **kwargs):
+        if path == selected:
+            raise PermissionError("private filesystem diagnostic")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(selected), "open", denied_open)
+    with pytest.raises(RunnerError) as caught:
+        api.resolve_settings(tmp_path, {"config": selected} if explicit else {}, {})
+    assert caught.value.code == "invalid_configuration"
+    assert caught.value.status == "invalid_request"
+    assert caught.value.exit_code == 2
+    assert "private filesystem diagnostic" not in str(caught.value)
