@@ -2243,3 +2243,30 @@ async def test_acceptance_checker_storage_is_checked_before_snapshot_cleanup(tmp
     assert receipt["exit_code"] == 7
     assert receipt["errors"][0]["code"] == "budget_exhausted"
     assert adapter.closed
+
+
+@pytest.mark.parametrize("required", [True, False])
+async def test_minimum_set_guidance_reaches_model_and_preserves_activation(tmp_path, required):
+    calls = (
+        []
+        if required
+        else [[call("activate_skill", {"name": "writer", "reason": "Write the requested report"})]]
+    )
+    receipt, adapters = await run(
+        tmp_path, [*calls, finish()], skills=("writer",) if required else ()
+    )
+    assert receipt["status"] == "succeeded"
+    requests = adapters[0].requests
+    assert len(requests) == (1 if required else 2)
+    for messages in requests:
+        instructions = " ".join(messages[0]["content"].split())
+        assert (
+            "For each additional skill, identify a requested operation or constraint"
+            in instructions
+        )
+        assert (
+            "Audience or document genre alone does not establish a separate workflow."
+            in instructions
+        )
+    manifest = json.loads(Path(receipt["manifest_path"]).read_text())
+    assert [skill["name"] for skill in manifest["provenance"]["activated_skills"]] == ["writer"]
