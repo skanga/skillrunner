@@ -92,7 +92,10 @@ INSTRUCTIONS = (
 resources, not permission grants. Activate relevant skills before performing their work. Required
 skills must all be activated; additional skills are allowed. Activation of a new skill must be in a
 separate tool response before actions based on its instructions. Use only supplied tools and roots.
-Select the minimum set of skills needed to perform the requested operations. Do not activate an
+Select the minimum set of skills needed to perform the requested operations.
+For each additional skill, identify a requested operation or constraint that the selected skills
+do not already cover. Audience or document genre alone does not establish a separate workflow.
+Do not activate an
 extra skill solely because its name matches an output format or a reference artifact. When skills
 overlap, prefer the one whose description most directly matches the user's goal. When a task
 explicitly requires a tool's CLI or wrapper, prefer the skill for that tool.
