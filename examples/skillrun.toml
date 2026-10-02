@@ -9,7 +9,7 @@ base_url = "http://localhost:8000/v1"
 model = "replace-with-your-model-id"
 auth_mode = "none"
 # These are examples, not claims about your model. Use its documented capacities.
-context_window_tokens = 32768
+context_window_tokens = 128000
 max_output_tokens = 4096
 output_token_parameter = "max_tokens"
 # When neither configuration nor endpoint metadata supplies modalities, the
