@@ -1,6 +1,8 @@
 """User-facing setup and diagnostics regressions; no live network."""
 
 import json
+import tomllib
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
@@ -85,7 +87,9 @@ def test_version_needs_no_configuration(tmp_path, monkeypatch):
     (tmp_path / "skillrun.toml").write_text("invalid TOML")
     result = CliRunner().invoke(app, ["--version"])
     assert result.exit_code == 0
-    assert "0.1.0" in result.stdout
+    project = Path(__file__).resolve().parents[2] / "pyproject.toml"
+    expected = tomllib.loads(project.read_text(encoding="utf-8"))["project"]["version"]
+    assert result.stdout.strip() == f"skillrunner {expected}"
 
 
 def test_config_show_reports_effective_model_and_sources(tmp_path, monkeypatch):

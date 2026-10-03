@@ -39,3 +39,8 @@ Plan recorded before implementation. User-owned untracked `skillrun.toml`, `skil
 - Added dedicated regression coverage in six test_usability modules, plus updated existing tests for intentional contract changes. Tests use temporary workspaces and mock transports; native non-Windows and real-provider behavior remain unverified in this session.
 - Capacity accounting intentionally remains conservative and history remains lossless. Context-aware pagination prevents a single read from consuming response capacity, not unlimited-document processing.
 - Historical benchmark claims were moved to docs/qualification-history.md and are explicitly not new real-model qualification.
+
+## Release preparation follow-up
+- Usability commit `fb83a1a` passed all six native CI combinations (Linux/macOS/Windows, Python 3.13/3.14): https://github.com/skanga/skillrunner/actions/runs/37159919217.
+- During v0.2.0 preparation, isolated source/wheel installs passed. The offline-install test requires the exact URL-based pylock cache, not only the registry cache populated by normal tool installation. Populating that cache from the unchanged, hash-verified lock in a temporary environment made both installation tests pass. No test was skipped or weakened to work around missing dependencies.
+- Release notes and final candidate validation are published with the GitHub release; no new paid model qualification is claimed.

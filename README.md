@@ -2,6 +2,8 @@
 
 Skill Runner runs one task using local Agent Skills packages, writes the results and an execution report, then exits. It selects relevant skills from their descriptions. `--skill` requires named skills while still allowing additional skills when needed.
 
+Release notes: [v0.2.0](docs/releases/v0.2.0.md).
+
 ## Quick start
 
 After installing the command (instructions below), start in an empty working directory.
@@ -48,7 +50,7 @@ For a standalone command, install from source or build and install a wheel:
 ```console
 uv tool install .
 uv build
-uv tool install ./dist/skillrunner-0.1.0-py3-none-any.whl
+uv tool install ./dist/skillrunner-0.2.0-py3-none-any.whl
 skillrun --help
 ```
 
