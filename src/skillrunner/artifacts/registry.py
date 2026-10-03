@@ -18,6 +18,7 @@ from typing import Literal
 
 from skillrunner.catalog.snapshots import file_identity
 from skillrunner.domain.errors import RunnerError
+from skillrunner.domain.request import FORMAT_ALIASES
 from skillrunner.tools.files import FileTools
 
 
@@ -216,7 +217,13 @@ class ArtifactRegistry:
                 previous = replace(previous, status="incomplete")
                 self._retained[frozen.record.id] = previous
             return previous
-        destination = self.artifacts_root / frozen.record.id
+        format_name = FORMAT_ALIASES.get(frozen.record.format.lower(), frozen.record.format.lower())
+        suffix = (
+            f".{format_name}"
+            if (format_name.isascii() and format_name.isalnum() and len(format_name) <= 16)
+            else ""
+        )
+        destination = self.artifacts_root / f"{frozen.record.id}{suffix}"
         size, digest = self._copy(
             frozen.path, destination, expected_size=frozen.size, expected_digest=frozen.digest
         )

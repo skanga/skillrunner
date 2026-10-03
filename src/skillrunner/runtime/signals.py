@@ -11,6 +11,7 @@ from skillrunner.config.models import ResolvedSettings
 from skillrunner.domain.request import RunRequest
 from skillrunner.model.openai_compatible import OpenAICompatibleAdapter
 from skillrunner.runtime.coordinator import AdapterFactory, Coordinator
+from skillrunner.runtime.progress import emit
 
 
 async def run_with_signals(
@@ -44,8 +45,23 @@ async def run_with_signals(
         for signum in (signal.SIGINT, signal.SIGTERM):
             original = signal.signal(signum, interrupt)
             handlers.callback(signal.signal, signum, original)
+
+        async def heartbeat() -> None:
+            while True:
+                await asyncio.sleep(5)
+                emit(
+                    "waiting",
+                    {
+                        **coordinator.ledger.summary(),
+                        "remaining_seconds": round(coordinator.deadline.remaining, 1),
+                    },
+                )
+
+        ticker = asyncio.create_task(heartbeat())
         try:
             return await coordinator.run()
         finally:
+            ticker.cancel()
+            await asyncio.gather(ticker, return_exceptions=True)
             for _ in range(owned_cancellations):
                 task.uncancel()

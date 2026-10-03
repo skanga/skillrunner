@@ -35,6 +35,26 @@ shutdown_grace = "0s"
     return resolve_settings(tmp_path, {}, {})
 
 
+def provision_validator(settings, format_name):
+    """Allow a real executable for preflight in tests that mock actual validation."""
+    import sys
+
+    from skillrunner.config.models import ExternalValidator
+
+    executable = str(Path(sys.executable).resolve())
+    info = Path(executable).stat()
+    settings.policy.allowed_executables.append(executable)
+    settings.policy.executable_identities[executable] = (
+        info.st_dev,
+        info.st_ino,
+        info.st_size,
+        info.st_mtime_ns,
+    )
+    settings.artifacts.validators[format_name] = ExternalValidator(
+        command=executable, args=["{path}"]
+    )
+
+
 class Adapter:
     def __init__(self, profile, calls):
         self.profile = profile
@@ -191,7 +211,7 @@ async def test_binary_completion_without_an_artifact_reports_required_artifact(t
     receipt, _ = await run(
         tmp_path,
         [finish(report="")],
-        output=tmp_path / "requested.pdf",
+        output=tmp_path / "requested.zip",
     )
 
     assert receipt["status"] == "failed"
@@ -300,7 +320,8 @@ async def test_missing_required_skill_never_connects_model(tmp_path):
 async def test_explicit_skill_text_completion_and_work_cleanup(tmp_path):
     receipt, adapters = await run(tmp_path, [finish()])
     assert receipt["status"] == "succeeded"
-    assert receipt["primary_output"] == receipt["report_path"]
+    assert receipt["primary_output"] != receipt["report_path"]
+    assert Path(receipt["primary_output"]).read_text() == "Completed answer."
     assert "Completed answer." in Path(receipt["report_path"]).read_text()
     assert "Use precise prose." in json.dumps(adapters[0].requests[0])
     assert adapters[0].closed
@@ -1920,6 +1941,7 @@ log_content = true
     )
     settings = resolve_settings(tmp_path, {}, {})
     settings.storage.max_tool_output_bytes = 123456
+    provision_validator(settings, "png")
     attachment = MediaAttachment(
         b"validated-private-image", "scratch/page.png", 10, 10, "gemma4-image-max-v1"
     )

@@ -1,0 +1,19 @@
+# Prefer `skillrun init` to generate this plus a starter skill.
+# Edit endpoint, model, and BOTH capacities using your deployment's documentation.
+default_model = "local"
+skills_dir = "./skills"
+output_dir = "./outputs"
+
+[models.local]
+base_url = "http://localhost:8000/v1"
+model = "replace-with-your-model-id"
+auth_mode = "none"
+context_window_tokens = 32768
+max_output_tokens = 4096
+# For authenticated services, use auth_mode="bearer" and an environment reference:
+# api_key_env = "MODEL_API_KEY"
+
+# Other settings use safety-oriented defaults: no commands, no overwrites,
+# 10-minute execution limit, and no detailed event-content logging.
+# Prompts, reports, and deliverables are still retained in the bundle.
+# Conservative UTF-8-byte context estimates make 32K suitable only for small tasks.

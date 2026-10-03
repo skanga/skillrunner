@@ -85,6 +85,7 @@ class RunBundle:
             run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ-") + uuid.uuid4().hex
             root = output_root / run_id
             root.mkdir(exist_ok=False)
+            (root / ".active").touch(exist_ok=False)
             for relative in (
                 "artifacts",
                 "work/inputs",
@@ -239,6 +240,7 @@ class RunBundle:
                 self.state["usage"]["elapsed_seconds"] = elapsed_seconds()
             self.state["identity"]["finished_at"] = _now()
 
+        finalized = False
         try:
             reporting_started = elapsed_seconds() if elapsed_seconds is not None else None
             # A bounded preliminary write lets the terminal report include time spent
@@ -268,6 +270,7 @@ class RunBundle:
                 self.events.close()
             record_finish()
             self.save()
+            finalized = True
         except (OSError, RunnerError):
             if reconcile_outcome is not None:
                 status, exit_code = reconcile_outcome(status, exit_code)
@@ -297,6 +300,9 @@ class RunBundle:
             if self.events:
                 with suppress(OSError, RunnerError):
                     self.events.close()
+        if finalized:
+            with suppress(OSError):
+                (self.root / ".active").unlink()
         self._receipt = self.redactor.clean(
             {
                 "schema_version": "1",

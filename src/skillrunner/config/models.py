@@ -89,7 +89,17 @@ class Discovery(StrictModel):
         return value
 
 
-class DirectModel(StrictModel):
+class NetworkSettings(StrictModel):
+    proxy_url: str | None = None
+    ca_bundle: str | Path | None = None
+
+    @field_validator("proxy_url")
+    @classmethod
+    def valid_proxy(cls, value: str | None) -> str | None:
+        return endpoint(value) if value is not None else None
+
+
+class DirectModel(NetworkSettings):
     auth_mode: Literal["bearer", "none"] = "bearer"
     api_key_env: EnvironmentReference | None = None
     context_window_tokens: PositiveInt | None = None
@@ -135,7 +145,7 @@ class Policy(StrictModel):
     unresolved_executables: list[str] = Field(default_factory=list, exclude=True)
 
 
-class MCPConfig(StrictModel):
+class MCPConfig(NetworkSettings):
     transport: Literal["stdio", "streamable-http"]
     allowed_tools: list[str] = Field(default_factory=list)
     command: str | None = None
@@ -148,7 +158,7 @@ class MCPConfig(StrictModel):
     @model_validator(mode="after")
     def connection(self) -> "MCPConfig":
         if self.transport == "stdio":
-            if not self.command or self.url or self.headers:
+            if not self.command or self.url or self.headers or self.proxy_url or self.ca_bundle:
                 raise ValueError("Stdio requires command and no HTTP fields")
         elif not self.url or self.command or self.args or self.cwd or self.env:
             raise ValueError("HTTP requires url and no process fields")
@@ -221,3 +231,4 @@ class ResolvedSettings(FileSettings):
     selected_model: str | None = None
     base_url: str | None = None
     sources: dict[str, str] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)

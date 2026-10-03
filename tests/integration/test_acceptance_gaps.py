@@ -357,27 +357,10 @@ async def test_runner_context_admission_stops_before_next_model_call_without_tru
     assert Path(artifact["path"]).read_text() == payload
 
 
-async def test_unsupported_pdf_is_nonzero_retained_and_never_claimed_as_primary(tmp_path):
+async def test_unsupported_pdf_is_blocked_before_generation_or_publication(tmp_path):
     settings = fixture(tmp_path)
     publication = tmp_path / "must-not-be-published.pdf"
-    calls = [
-        [call("write_file", {"path": "scratch/candidate.pdf", "content": "not a PDF"}, "write")],
-        [
-            call(
-                "register_artifact",
-                {
-                    "path": "scratch/candidate.pdf",
-                    "format": "pdf",
-                    "role": "primary",
-                    "description": "Unvalidated PDF candidate",
-                },
-                "register",
-            )
-        ],
-        finish(primary_artifact_id="ignored-by-test"),
-    ]
-
-    calls[-1] = registered_primary
+    calls = []
     receipt = await run_task(
         RunRequest(
             prompt="Create a PDF",
@@ -397,10 +380,8 @@ async def test_unsupported_pdf_is_nonzero_retained_and_never_claimed_as_primary(
     assert receipt["primary_output"] is None
     assert not publication.exists()
     manifest = manifest_for(receipt)
-    artifact = manifest["outputs"]["artifacts"][0]
-    assert artifact["status"] == "incomplete"
-    assert artifact["validation_level"] == "none"
-    assert Path(artifact["path"]).read_text() == "not a PDF"
+    assert manifest["outputs"]["artifacts"] == []
+    assert manifest["usage"]["model_attempts"] == 0
     assert manifest["outputs"]["publication"]["state"] != "committed"
 
 

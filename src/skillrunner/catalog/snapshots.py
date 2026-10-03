@@ -1,10 +1,11 @@
 """Bounded stable copies; these checks are not host-process containment."""
 
+import fnmatch
 import hashlib
 import json
 import os
 import stat
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -74,14 +75,30 @@ def validate_output_locations(inputs: list[Path], output_root: Path, primary: Pa
             )
 
 
+def validate_excludes(patterns: Sequence[str]) -> None:
+    if any(
+        not pattern
+        or pattern.startswith(("/", "\\"))
+        or ":" in pattern
+        or ".." in pattern.replace("\\", "/").split("/")
+        for pattern in patterns
+    ):
+        raise RunnerError(
+            "invalid_arguments",
+            "Exclusions must be nonempty relative globs without parent traversal.",
+        )
+
+
 def scan_tree(
     source: Path,
     *,
     check: Callable[[], None] | None = None,
     max_files: int | None = None,
     max_bytes: int | None = None,
+    exclude: Sequence[str] = (),
 ) -> tuple[TreeEntry, ...]:
     """Capture metadata without reading resource bodies; materialize only internal links."""
+    validate_excludes(exclude)
     entries: list[TreeEntry] = []
     file_count = 0
     byte_count = 0
@@ -95,6 +112,14 @@ def scan_tree(
         inherited_link: bool = False,
     ) -> None:
         nonlocal file_count, byte_count
+        if relative and any(
+            fnmatch.fnmatchcase(
+                relative if "/" in pattern.replace("\\", "/") else relative.rsplit("/", 1)[-1],
+                pattern.replace("\\", "/"),
+            )
+            for pattern in exclude
+        ):
+            return
         if check:
             check()
         resolved = path.resolve(strict=True)
@@ -147,6 +172,7 @@ def snapshot_tree(
     max_bytes: int,
     check: Callable[[], None] | None = None,
     expected_fingerprint: str | None = None,
+    exclude: Sequence[str] = (),
 ) -> Snapshot:
     """Publish a completed private snapshot or remove only our incomplete destination."""
     for bound in (max_files, max_bytes):
@@ -157,7 +183,9 @@ def snapshot_tree(
     if destination.resolve() == root or destination.resolve().is_relative_to(root):
         raise RunnerError("invalid_arguments", "Snapshot destination overlaps its source.")
     try:
-        entries = scan_tree(source, check=check, max_files=max_files, max_bytes=max_bytes)
+        entries = scan_tree(
+            source, check=check, max_files=max_files, max_bytes=max_bytes, exclude=exclude
+        )
     except RunnerError as exc:
         if expected_fingerprint is None or exc.code != "invalid_arguments":
             raise
@@ -238,7 +266,9 @@ def snapshot_tree(
                 )
             )
         try:
-            after = scan_tree(source, check=check, max_files=max_files, max_bytes=max_bytes)
+            after = scan_tree(
+                source, check=check, max_files=max_files, max_bytes=max_bytes, exclude=exclude
+            )
         except RunnerError as exc:
             if exc.code != "invalid_arguments":
                 raise

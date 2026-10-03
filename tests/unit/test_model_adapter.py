@@ -418,7 +418,9 @@ async def test_ids_only_or_missing_route_requires_exact_configuration(status: in
 @pytest.mark.parametrize("status", [401, 403, 302])
 async def test_discovery_auth_and_redirects_do_not_fallback(status: int) -> None:
     client = adapter(
-        profile(context_window_tokens=100, max_output_tokens=10),
+        profile(
+            context_window_tokens=100, max_output_tokens=10, discovery=Discovery(path="metadata")
+        ),
         lambda _: httpx.Response(status, headers={"location": "https://elsewhere.test/"}),
     )
     try:
@@ -503,7 +505,9 @@ async def test_metadata_fallback_and_bounded_body() -> None:
     finally:
         await client.aclose()
     client = adapter(
-        profile(context_window_tokens=100, max_output_tokens=10),
+        profile(
+            context_window_tokens=100, max_output_tokens=10, discovery=Discovery(path="metadata")
+        ),
         lambda _: httpx.Response(200, content=b" " * (1_048_576 + 1)),
     )
     try:

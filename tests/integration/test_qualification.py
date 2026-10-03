@@ -170,7 +170,6 @@ context_window_tokens = 1050000
 max_output_tokens = 128000
 [policy]
 allowed_executables = [{executable}]
-allowed_env = ["{reference}"]
 [policy.command_env.{executable}]
 UV_OFFLINE = "{reference}"
 '''

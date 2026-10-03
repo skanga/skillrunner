@@ -18,6 +18,7 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.message import SessionMessage
 
 from skillrunner.config.models import MCPConfig, Policy
+from skillrunner.config.network import tls_verify
 from skillrunner.domain.errors import RunnerError
 from skillrunner.runtime.budgets import Deadline
 from skillrunner.runtime.environment import build_child_environment
@@ -219,7 +220,12 @@ class _Connection:
                         headers[name] = manager.environ[reference]
                     self.http_transport = _BoundedTransport(
                         manager.http_transport
-                        or httpx2.AsyncHTTPTransport(trust_env=False, retries=0),
+                        or httpx2.AsyncHTTPTransport(
+                            trust_env=False,
+                            retries=0,
+                            proxy=config.proxy_url,
+                            verify=tls_verify(config.ca_bundle),
+                        ),
                         manager.max_bytes,
                     )
                     client = await stack.enter_async_context(

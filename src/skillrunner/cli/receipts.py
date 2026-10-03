@@ -18,6 +18,8 @@ def render(receipt: dict[str, Any], json_mode: bool) -> None:
                 typer.echo(f"{field}: {receipt[field]}")
     for error in receipt.get("errors", []):
         typer.echo(f"{error.get('code', 'error')}: {error.get('message', '')}", err=True)
+        if error.get("suggested_action"):
+            typer.echo(f"Next action: {error['suggested_action']}", err=True)
 
 
 def fail(error: RunnerError, json_mode: bool = False) -> NoReturn:
@@ -31,7 +33,16 @@ def fail(error: RunnerError, json_mode: bool = False) -> NoReturn:
             "report_path": None,
             "manifest_path": None,
             "artifact_paths": [],
-            "errors": [{"code": error.code, "message": error.message}],
+            "errors": [
+                {
+                    "code": error.code,
+                    "message": error.message,
+                    "details": error.details,
+                    "suggested_action": error.details.get(
+                        "suggested_action", "Run skillrun --help for usage."
+                    ),
+                }
+            ],
         },
         json_mode,
     )

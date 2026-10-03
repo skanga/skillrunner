@@ -297,9 +297,10 @@ async def test_selection_uses_called_executor_when_unused_inspector_is_created_l
     tmp_path, no_match
 ):
     from tests.integration.test_coordinator import Adapter as CoordinatorAdapter
-    from tests.integration.test_coordinator import call, finish, fixture
+    from tests.integration.test_coordinator import call, finish, fixture, provision_validator
 
     settings = fixture(tmp_path)
+    provision_validator(settings, "png")
     profile = settings.models["test"].model_copy(
         update={
             "input_modalities": ["text", "image"],

@@ -1,14 +1,23 @@
+# Advanced reference. Prefer `skillrun init` or skillrun-minimal.toml for first use.
 # Copy to ./skillrun.toml and edit the model profile before running a task.
 schema_version = 1
 skills_dir = "./skills"
 output_dir = "./outputs"
 default_model = "local"
+# Optional read-only image helper; also enable the models.vision profile below
+# and the allowlisted artifacts.validators.png parser.
+# image_inspector = "vision"
 
 [models.local]
 base_url = "http://localhost:8000/v1"
 model = "replace-with-your-model-id"
 auth_mode = "none"
 # These are examples, not claims about your model. Use its documented capacities.
+# Text estimates conservatively count UTF-8 bytes, not model-specific tokens.
+# Reads are paged against remaining context but history is never discarded.
+# Optional enterprise networking (no ambient proxy or CA environment inheritance):
+# proxy_url = "http://proxy.example:8080"
+# ca_bundle = "./certificates/enterprise.pem"
 context_window_tokens = 128000
 max_output_tokens = 4096
 output_token_parameter = "max_tokens"
@@ -60,7 +69,7 @@ shutdown_grace = "5s"
 max_steps = 40
 max_tool_calls = 100
 max_tokens = 100000
-# Retry transient model transport failures once; set to 0 to disable.
+# Retry transport failures or empty completions once PER MODEL TURN; 0 disables.
 model_transport_retries = 1
 
 [storage]
@@ -80,13 +89,14 @@ max_archive_expanded_bytes = 268_435_456
 # Empty permits no commands. Add only installed executables your skills need.
 # Examples: ["python3", "node"] or absolute executable paths.
 allowed_executables = []
-# allowed_env = ["SERVICE_TOKEN"]
+# Nonempty allowed_env is obsolete and rejected; use command_env below.
 
 # Explicit child environment references, keyed by the configured executable.
 # [policy.command_env.python3]
 # SERVICE_TOKEN = "MY_SERVICE_TOKEN"
 
 [diagnostics]
+# This disables detailed event contents, NOT retained prompts/reports/artifacts.
 log_content = false
 retain_work = false
 redact_env = []
@@ -121,3 +131,21 @@ redact_env = []
 # [artifacts.validators.png]
 # command = "/absolute/path/to/png-validator"
 # args = ["{path}"]
+
+# Optional acceptance checks; the command must be installed and allowlisted.
+# [acceptance]
+# max_repairs = 2
+# [acceptance.checks.deliverable]
+# command = "/absolute/path/to/check-deliverable"
+# args = ["{path}"]
+
+# Optional image inspector. Uncomment top-level image_inspector above as well.
+# [models.vision]
+# base_url = "https://your-vision-service.example/v1"
+# model = "replace-with-your-vision-model-id"
+# auth_mode = "bearer"
+# api_key_env = "VISION_API_KEY"
+# context_window_tokens = 32768
+# max_output_tokens = 4096
+# input_modalities = ["text", "image"]
+# image_accounting = "openai-patch-high-v1"

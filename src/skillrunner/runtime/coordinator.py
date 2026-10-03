@@ -4,7 +4,6 @@ import asyncio
 import copy
 import hashlib
 import json
-import re
 import signal
 import stat
 import tempfile
@@ -29,6 +28,7 @@ from skillrunner.config.models import ModelProfile, ResolvedSettings
 from skillrunner.config.secrets import resolve_api_key
 from skillrunner.config.sources import select_model
 from skillrunner.domain.errors import RunnerError
+from skillrunner.domain.filenames import requested_output_filename
 from skillrunner.domain.request import FORMAT_ALIASES, RunRequest
 from skillrunner.mcp import MCPManager
 from skillrunner.model.openai_compatible import OpenAICompatibleAdapter
@@ -41,37 +41,15 @@ from skillrunner.runtime.context import RunContext
 from skillrunner.runtime.environment import build_child_environment
 from skillrunner.runtime.inspection import inspect_png
 from skillrunner.runtime.media import read_png
+from skillrunner.runtime.preflight import check_dependencies, check_format
 from skillrunner.runtime.processes import ProcessSupervisor
+from skillrunner.runtime.progress import emit as progress
 from skillrunner.runtime.storage import check_tree_bytes, monitor_operation
 from skillrunner.tools import schemas
 from skillrunner.tools.dispatch import ToolRegistry, ToolResult
 from skillrunner.tools.files import FileTools
 
 AdapterFactory = Callable[[ModelProfile, SecretStr | None], Any]
-
-
-def requested_output_filename(prompt: str) -> str | None:
-    """Return the basename of a file explicitly named as the output destination."""
-    pattern = (
-        r"(?:\b(?:write|save|publish|output|deliver|create|produce)\b"
-        r"(?:\s+(?:the|a|an|final|primary|output|result|report|file|artifact|deliverable)){0,5}"
-        r"\s+(?:to|as|at|named|called)\s+"
-        r"|\b(?:output|deliverable|file)\s+(?:should|must|will|shall)\s+be\s+"
-        r"(?:written|saved|published)\s+(?:to|as|at|in)\s+)"
-        r"(?:`([^`]+)`|\"([^\"]+)\"|'([^']+)'|([^\s,;:!?)}\]]+))"
-    )
-    for match in re.finditer(pattern, prompt, flags=re.IGNORECASE):
-        raw = next(value for value in match.groups() if value is not None).strip()
-        if match.group(4) is not None:
-            raw = raw.rstrip(".")
-        name = re.split(r"[/\\]", raw)[-1]
-        if (
-            name not in {"", ".", ".."}
-            and not re.search(r'[<>:"|?*\x00]', name)
-            and (Path(name).suffix or raw != name or match.group(4) is None)
-        ):
-            return name
-    return None
 
 
 INSTRUCTIONS = (
@@ -210,6 +188,7 @@ class Coordinator:
             raise asyncio.CancelledError
 
     def event(self, name: str, payload: dict[str, Any]) -> None:
+        progress(name, payload)
         if self.bundle.events:
             metadata = {key: value for key, value in payload.items() if key != "_content"}
             tools = getattr(self, "tools", None)
@@ -242,6 +221,7 @@ class Coordinator:
         check_tree_bytes([root / "artifacts"], self.settings.storage.max_artifact_bytes, self.check)
 
     def phase(self, phase: str) -> None:
+        progress("phase", {"phase": phase, **self.ledger.summary()})
         self.bundle.state["lifecycle"]["phase"] = phase
         self.bundle.save()
 
@@ -338,6 +318,7 @@ class Coordinator:
         request, settings, storage = self.request, self.settings, self.settings.storage
         self.check()
         self.bundle.state["request"] = request.model_dump(mode="json")
+        self.bundle.state["diagnostics"]["warnings"].extend(settings.warnings)
         self.bundle.state["controls"] = {
             "limits": settings.limits.model_dump(),
             "storage": storage.model_dump(),
@@ -378,6 +359,11 @@ class Coordinator:
         self.files.register_root(
             "artifacts", root / "artifacts", writable=True, max_bytes=storage.max_artifact_bytes
         )
+        check_format(settings, request.format or "md", self.environ)
+        check_dependencies(settings, self.environ)
+        # Credentials and alias selection must fail before expensive input copies.
+        selected = select_model(settings)
+        resolve_api_key(selected, self.environ)
         used_files = used_bytes = 0
         inventory: list[dict[str, Any]] = []
         for index, source in enumerate(request.inputs, 1):
@@ -388,6 +374,7 @@ class Coordinator:
                 max_files=storage.max_input_files - used_files,
                 max_bytes=storage.max_input_bytes - used_bytes,
                 check=self.check,
+                exclude=request.input_excludes,
             )
             used_files += snapshot.file_count
             used_bytes += snapshot.total_bytes
@@ -418,6 +405,9 @@ class Coordinator:
         if request.output:
             if request.output_is_directory:
                 try:
+                    if request.output_kind == "directory":
+                        validate_output_locations(protected, settings.output_dir, request.output)
+                        request.output.mkdir(parents=True, exist_ok=True)
                     directory = request.output.stat()
                 except OSError as exc:
                     raise RunnerError(
@@ -698,6 +688,45 @@ class Coordinator:
                 "skill_not_activated", "Activate a relevant skill before doing its work."
             )
 
+    def _read_with_context_budget(self, values: dict[str, Any]) -> dict[str, Any]:
+        """Page explicitly rather than admit a read that makes the next turn impossible."""
+        call = self.tools.current_call
+        assert call is not None
+        ceiling = min(self.profile.context_window_tokens or 0, self.ledger.available_tokens)
+        reserve = min(self.profile.max_output_tokens or 4096, 4096) + 1024
+        # Hash/read once; shrink only the returned page on UTF-8 codepoint boundaries.
+        result = self.files.read_text(**values)
+        result["context_remaining_estimate"] = 0
+        while True:
+            trial = copy.deepcopy(self.context)
+            trial.append_tool_result(
+                call.id, ToolResult(call.id, call.name, True, True, result).as_dict()
+            )
+            remaining = ceiling - trial.estimate(self.tools.model_schemas())
+            result["context_remaining_estimate"] = max(0, remaining)
+            if remaining >= reserve and self.files._fits(result):
+                return result
+            if not result["text"]:
+                break
+            result["text"] = result["text"][: len(result["text"]) // 2]
+            result["next_offset"] = result["offset"] + len(result["text"].encode("utf-8"))
+            result["truncated"] = result["next_offset"] < result["size_bytes"]
+            result["read_limit_reason"] = (
+                "Remaining context/tool budget; use next_offset to continue."
+            )
+            if not result["text"]:
+                break
+        raise RunnerError(
+            "context_capacity_exceeded",
+            "No room remains for a readable page and a model response.",
+            details={
+                "suggested_action": (
+                    "Use smaller inputs or a larger context and token budget; "
+                    "required content is never silently discarded."
+                )
+            },
+        )
+
     def _bind_tools(self) -> None:
         for name, args_model, description in (
             (
@@ -768,6 +797,8 @@ class Coordinator:
                             staging=self.bundle.root / "work/staging",
                             monitor=self.monitor_storage,
                         )
+                    if tool_name == "read_text":
+                        return self._read_with_context_budget(args.model_dump(exclude_none=True))
                     return getattr(self.files, tool_name)(**args.model_dump(exclude_none=True))
 
                 return invoke
@@ -1126,23 +1157,16 @@ class Coordinator:
                         )
                     },
                 )
-            if (
-                self.request.format == "md"
-                and self.request.output is None
-                and not self.settings.acceptance.checks
-            ):
-                self.bundle.state["outputs"]["primary_output"] = str(self.bundle.root / "result.md")
-            else:
-                path = (
-                    self.bundle.root
-                    / "work/scratch"
-                    / f"answer-{uuid.uuid4().hex}.{self.request.format}"
-                )
-                self.files.write_file(str(path), self.answer)
-                primary = self.registry.register(
-                    path, format=self.request.format, role="primary", description="Primary answer"
-                )
-                self.record_artifact_registration(primary)
+            path = (
+                self.bundle.root
+                / "work/scratch"
+                / f"answer-{uuid.uuid4().hex}.{self.request.format}"
+            )
+            self.files.write_file(str(path), self.answer)
+            primary = self.registry.register(
+                path, format=self.request.format, role="primary", description="Primary answer"
+            )
+            self.record_artifact_registration(primary)
         for record in self.registry.records:
             self.check()
             frozen = self.registry.freeze(record, writers_stopped=True)

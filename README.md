@@ -2,11 +2,35 @@
 
 Skill Runner runs one task using local Agent Skills packages, writes the results and an execution report, then exits. It selects relevant skills from their descriptions. `--skill` requires named skills while still allowing additional skills when needed.
 
-The reference candidate (`0fb4ba6`) met the empirical qualification thresholds: 51 of 63 task trials (80.95%, including all failures and an independent grading correction) and 21 of 22 automatic-selection cases (95.45%, with one false activation). The task trials used a pinned GPT-5.5 executor with a Gemma image-inspection helper; these results do not guarantee the same quality from every compatible model.
+## Quick start
 
-Subsequent completion fixes add runtime-version provenance and precise endpoint-capability diagnostics. The empirical scores above remain measurements of `0fb4ba6`; no new paid qualification was performed for these fixes. Version probes add bounded process time and can stop a run if its deadline expires.
+After installing the command (instructions below), start in an empty working directory.
+Use your endpoint's literal model ID and **documented** capacities; the numbers below
+are illustrative, not universal model limits.
 
-For reference candidate `0fb4ba6`, native CI passed on Linux, macOS, and Windows with Python 3.13 and 3.14. A separate Windows job passed the no-usable-POSIX-shell checks on product code identical to that reference candidate. Its tool-calling and artifact-output conformance passed against two distinct OpenAI-compatible endpoint implementations. See the [reference native CI run](https://github.com/skanga/skillrunner/actions/runs/36650728357) and [reference Windows shell qualification](https://github.com/skanga/skillrunner/actions/runs/36653125690). The subsequent completion fixes have [separate native CI checks](https://github.com/skanga/skillrunner/pull/23/checks).
+```console
+skillrun init --model your-model-id --context-window 32768 --max-output 4096
+skillrun doctor
+skillrun doctor --network
+skillrun run "Summarize these notes" -i notes.txt --output-file summary.md
+```
+
+`init` creates a minimal `skillrun.toml` and a text-only `summarize` skill. It never
+overwrites existing files. Create `notes.txt` yourself before running the last command.
+The local template uses `http://localhost:8000/v1` without authentication; change it
+with `--base-url`. For an authenticated service:
+
+```console
+skillrun init --template authenticated --base-url https://your-service.example/v1 --model your-model-id --context-window 32768 --max-output 4096 --api-key-env MODEL_API_KEY
+```
+
+Set `MODEL_API_KEY` in the invocation environment (PowerShell: `$env:MODEL_API_KEY = '...'`;
+POSIX shells: `export MODEL_API_KEY='...'`). Never put the credential in the command's
+`--api-key-env` argument or configuration file. Commands remain disabled until explicitly
+allowlisted. There are no implicit downloads or dependency installations.
+
+Use `skillrun --version`, `skillrun config show`, and `skillrun --help` to inspect your setup.
+`doctor` is offline; **only `doctor --network` contacts the model and can consume provider resources**.
 
 ## Install and inspect
 
@@ -55,7 +79,11 @@ Packages do not need a runner-specific manifest. Discovery stops inside a packag
 
 ## Configure and run
 
-Copy [examples/skillrun.toml](examples/skillrun.toml) to `skillrun.toml` in your working directory. Set the endpoint, literal model ID, authentication mode, and documented model capacities. The sample uses placeholder capacities and a local endpoint; edit them for your model.
+Prefer `skillrun init` for first-time setup. For manual configuration, start with
+[examples/skillrun-minimal.toml](examples/skillrun-minimal.toml), or use
+[examples/skillrun.toml](examples/skillrun.toml) as the advanced reference. Set the
+endpoint, literal model ID, authentication mode, and documented model capacities.
+Example capacities are placeholders, not claims about your model.
 
 ```console
 skillrun run "Summarize these notes" -i notes.txt -o summary.md
@@ -67,7 +95,14 @@ skillrun run "Summarize notes" -i notes.txt -b http://localhost:8000/v1 -m your-
 
 `--prompt-stdin` reads until EOF. Supply exactly one nonempty prompt source: positional text, `-p/--prompt-file`, or `--prompt-stdin`. Task execution always requires `run`. All task flags follow it. For example, `skillrun run "doctor"` is a task with that prompt.
 
-Use `skillrun doctor` to check configuration, credential availability, model connectivity, and installed runtime paths. **Every doctor invocation contacts the configured model and may consume provider resources.** It attempts discovery and a small completion request. Missing configuration or credentials prevent the check and produce a failure. Runtime presence checks do not launch binaries. No runtime is universally required except the coordinator's Python; skills determine their own dependencies.
+Use `skillrun doctor` for independent offline checks of the catalog, model settings,
+credential availability, bundle parent, configured validators, connector prerequisites,
+and runtime paths. A failing check does not hide the other results. No binaries or
+connectors are launched. `doctor --network` additionally requests a small, validated
+tool call from the selected model; a text reply or truncated response is not a pass.
+This verifies basic tool calling, not task quality, connector connectivity, or script
+behavior. Missing configuration or credentials produce a failure. No runtime is
+universally required except the coordinator's Python; skills determine dependencies.
 
 ## Options
 
@@ -80,10 +115,14 @@ Short aliases are case-sensitive. Repeated input and skill options accumulate in
 | `-S, --skills-dir` | Catalog root; default `./skills` |
 | `-s, --skill` | Required skill name; repeatable |
 | `-i, --input` | Input file or directory; repeatable |
-| `-o, --output` | Publish the primary deliverable at a file path or inside an existing directory |
+| `-o, --output` | Legacy: publish to a file or an existing directory |
+| `--output-file` | Publish at this exact file path |
+| `--output-directory` | Publish inside a directory, creating it if needed |
+| `--exclude` | Explicit input-relative exclusion glob; repeatable |
 | `-O, --output-dir` | Bundle parent; default `./outputs` |
-| `-f, --format` | Primary output format; otherwise inferred, then Markdown |
+| `-f, --format` | Primary output format; otherwise inferred from a destination filename, then Markdown |
 | `-m, --model` | Configured alias, or literal ID with a base URL |
+| `--model-alias` | Select a named profile and ignore `OPENAI_BASE_URL` |
 | `-b, --base-url` | OpenAI-compatible endpoint |
 | `-c, --config` | Select one TOML file instead of `./skillrun.toml` |
 | `--policy` | Replace the entire embedded policy with a TOML policy file |
@@ -91,16 +130,17 @@ Short aliases are case-sensitive. Repeated input and skill options accumulate in
 | `--max-steps` | Model-turn limit; default `40` |
 | `--max-tool-calls` | Aggregate tool-call limit; default `100` |
 | `--max-tokens` | Aggregate input/output token budget; default `100000` |
-| `--model-transport-retries` | Shared retries for transient model transport failures and empty terminal completions; default `1` |
+| `--model-transport-retries` | Per-turn retries shared by transient transport failures and empty completions; default `1` |
 | `--shutdown-grace` | Child shutdown grace; default `5s` |
 | `--overwrite` | Allow replacing the explicitly requested primary output |
 | `-j, --json` | One terminal JSON receipt on stdout |
-| `-q, --quiet` | Suppress progress; retain errors and receipt |
+| `-q, --quiet` | Suppress progress; retain errors, warnings, and receipt |
+| `--log-content / --no-log-content` | Override TOML event-content logging |
 | `-h, --help` | Usage and examples without starting a run |
 
 Durations require `ms`, `s`, `m`, or `h`, for example `500ms`, `1.5m`, or `1h`. TOML durations must be strings. Only shutdown grace permits zero (`0s`). Integer limits must be positive. Cleanup and final reporting can extend beyond the execution deadline.
 
-An empty assistant completion (`finish_reason="stop"`, blank or null content, and no tool calls) is recorded as a protocol error and may use the same retry allowance as HTTP 429/5xx and connection failures. Each attempt is separately charged within existing budgets; zero retries disables recovery. Other protocol errors and output-length stops are not retried, and dispatched tools are never replayed automatically.
+An empty assistant completion (`finish_reason="stop"`, blank or null content, and no tool calls) is recorded as a protocol error and may use the same retry allowance as HTTP 429/5xx and connection failures. The allowance resets after a successful model turn; it is not one shared retry for the entire run. Each attempt is separately charged within existing budgets; zero retries disables recovery. Other protocol errors and output-length stops are not retried, and dispatched tools are never replayed automatically.
 
 Storage limits are configured in `[storage]`. Defaults permit 10,000 input files totaling 1 GiB, 20,000 activated-package files totaling 512 MiB, 2 GiB of artifacts, and 4 GiB of scratch data. Tool output is bounded at 1 MiB, event logs at 10 MiB, individual reads at 64 KiB, and expanded archives at 256 MiB. Exceeding a limit produces an explicit failure; required input and instructions are not silently omitted. MCP tool results share the tool-output and execution budgets.
 
@@ -119,20 +159,30 @@ CLI and environment paths resolve against the invocation directory. Paths writte
 | `SKILLRUN_MAX_STEPS` | Model-turn limit |
 | `SKILLRUN_MAX_TOOL_CALLS` | Tool-call limit |
 | `SKILLRUN_MAX_TOKENS` | Token budget |
+| `SKILLRUN_MODEL_TRANSPORT_RETRIES` | Per-turn retry allowance |
 | `OPENAI_BASE_URL` | Direct endpoint; requires literal `--model` |
 | `OPENAI_API_KEY` | Default bearer credential reference |
 
-Without a base URL override, `--model` chooses `[models.<alias>]`; otherwise `default_model` chooses the alias. With `--base-url` or `OPENAI_BASE_URL`, `--model` is a literal model ID and `[direct_model]` supplies authentication and capacity settings. It does not borrow a named profile's credentials. No model name is hardcoded or allowlisted.
+Without a base URL override, `--model` chooses `[models.<alias>]`; otherwise `default_model` chooses the alias. With `--base-url` or `OPENAI_BASE_URL`, `--model` is a literal model ID and `[direct_model]` supplies authentication and capacity settings. Ambient endpoint selection emits a warning. Use `--model-alias NAME` to ignore `OPENAI_BASE_URL`; it cannot be combined with `--model` or `--base-url`. It does not borrow a named profile's credentials. No model name is hardcoded or allowlisted.
 
 The adapter uses Chat Completions and preserves the endpoint path prefix. It does not add `/v1`. Use `auth_mode = "none"` for unauthenticated endpoints; these requests omit the Authorization header. For bearer authentication, `api_key_env` names an environment variable. Store credentials there, never in TOML or task text.
 
-Provide `context_window_tokens` and `max_output_tokens` from the model's documented limits, or configure `[models.<alias>.discovery]` with an endpoint-relative `path` and dotted `context_window_field` / `max_output_field` mappings. The adapter probes model metadata but does not assume every service exposes capacity fields. Missing capacities block execution rather than guessing. Configured values take precedence over discovered values. Set `output_token_parameter` to `max_tokens` or `max_completion_tokens` as required by the endpoint.
+Provide `context_window_tokens` and `max_output_tokens` from the model's documented limits, or configure `[models.<alias>.discovery]` with an endpoint-relative `path` and dotted `context_window_field` / `max_output_field` mappings. When both capacities are configured and no explicit discovery mapping exists, metadata is not contacted. Otherwise discovery is required and strict; the adapter does not assume every service exposes capacity fields. Missing capacities block execution rather than guessing. Configured values take precedence over discovered values. Set `output_token_parameter` to `max_tokens` or `max_completion_tokens` as required by the endpoint.
 
-[examples/skillrun.toml](examples/skillrun.toml) shows all supported top-level sections: model profiles, direct-model settings, limits, storage, policy, MCP, artifact validators, and diagnostics. Optional inference options belong in `[models.<alias>.request_options]` or `[direct_model.request_options]`. PNG inspection is opt-in: configure `input_modalities = ["text", "image"]`, `image_accounting = "openai-patch-high-v1"`, and an allowlisted `[artifacts.validators.png]` parser. Then `read_media` with `representation = "image"` validates a copy and sends the PNG at high detail after the tool batch. The original input is unchanged. Other formats, missing capabilities, and missing validators return `unsupported_capability`.
+[examples/skillrun.toml](examples/skillrun.toml) shows model profiles, direct-model settings, limits, storage, policy, MCP, artifact validators, diagnostics, acceptance checks, and an image inspector. Optional inference options belong in `[models.<alias>.request_options]` or `[direct_model.request_options]`. PNG inspection is opt-in: configure `input_modalities = ["text", "image"]`, `image_accounting = "openai-patch-high-v1"`, and an allowlisted `[artifacts.validators.png]` parser. Then `read_media` with `representation = "image"` validates a copy and sends the PNG at high detail after the tool batch. The original input is unchanged. Other formats, missing capabilities, and missing validators return `unsupported_capability`.
 
 The `openai-patch-high-v1` accounting contract uses 32-pixel patches, a 2048-pixel dimension limit, a 2500-patch budget, and a 1.2 multiplier, plus one token for rounding. Select it only for an endpoint implementing those rules; model names do not select it automatically. Image tokens are estimated separately and charged on every request retaining the image. Context, aggregate-token, and tool-output byte limits still apply. Oversized images fail rather than being truncated. Logs retain image metadata and digests, never the image payload, even with `--log-content`. Audio, video, remote-image fetching, and automatic PDF conversion are unsupported; provisioned tools can render PDF pages to PNG before inspection.
 
 For Gemma 4 deployments using the standard single-image processor, explicitly select `image_accounting = "gemma4-image-max-v1"`. This reserves 1,122 tokens per image per request: up to 1,120 visual tokens plus two image boundary tokens. Select this contract only when the deployment uses those limits; custom cropping or expansion needs a matching contract. It preserves the same PNG validation, high-detail transport, byte limits, and metadata-only logs. Configure context and output limits for your deployment separately.
+
+Text admission conservatively estimates one token per serialized UTF-8 byte, including
+tool schemas and repeated history; it is not a model tokenizer. A small run can begin
+with roughly 15 KiB of framework overhead. The 32K example is suitable only for small
+tasks, not arbitrary documents. Storage limits do not imply that the data fits context.
+`read_text` pages are reduced when needed to reserve room for the next model response;
+results include `truncated`, `next_offset`, and `context_remaining_estimate`. A smaller
+page does not mean the file was read completely. Reading all pages may still exceed
+the total context: use a larger-capacity model or smaller inputs in that case.
 
 The conversation and skill instructions must fit the context window. The runner does not silently truncate instructions, summarize history, or discard earlier turns to continue. Task requests require model tool calling; incompatible responses produce a failure instead of fabricated execution.
 
@@ -140,25 +190,64 @@ The conversation and skill instructions must fit the context window. The runner 
 
 Inputs and activated packages are snapshotted and read-only through runner-managed file tools. Paths mentioned only in a prompt do not grant file access; pass files with `--input`. Put output locations outside input trees. In particular, `--input .` conflicts with default `./outputs`; choose a separate `--output-dir` and, if supplied, `--output`.
 
+Preview input selection without copying or sending contents:
+
+```console
+skillrun inputs preview -i ./project --exclude .git --exclude .venv --exclude .env
+skillrun run "Review these sources" -i ./project --exclude .git --exclude .venv --exclude .env -O ./outputs
+```
+
+There are **no automatic ignore rules**. Exclusions use case-sensitive globs: a pattern
+without `/` matches a basename at any depth; one containing `/` matches the full
+input-relative path. Matching directories omit their subtrees. Patterns are recorded
+in the manifest and apply to both snapshot scans. Preview lists selected files and
+bytes; it does not guarantee model context capacity. Exclusions do not relax output/input
+overlap protection: `-i .` still needs an output directory outside the working directory.
+
 With no `-i/--input`, the run receives no input snapshot. With no `-o/--output`, the primary deliverable stays in its run bundle under `./outputs` by default.
 
 **Host scripts are not sandboxed.** They run with the host user's filesystem and network access. Runner-managed path checks and executable allowlists govern dispatch but cannot contain a script after launch. Run only trusted packages. Container isolation is deferred.
 
 `[policy] allowed_executables = []` permits no commands. Add installed executables that your skills need. An installed binary still cannot run until allowed. Executable identities are resolved and checked before launch. Python, Node.js, and a POSIX shell are independent capabilities; Windows does not require a shell unless a selected skill does. The runner does not install dependencies automatically.
 
+`policy.allowed_env` is obsolete: a nonempty list is rejected with migration guidance;
+empty legacy lists remain accepted. Use `policy.command_env` instead. For example,
+map `HOME = "HOME"` explicitly for an allowlisted tool requiring the user's home directory;
+otherwise it will not inherit it.
+
 Child processes receive a minimal environment. `[policy.command_env.<executable>]` explicitly maps child variable names to environment-variable references. Do not depend on arbitrary inherited secrets. Process groups on POSIX and Job Objects on Windows manage child cleanup; they do not provide containment.
 
 Model Context Protocol (MCP) servers must be configured under `[mcp.<name>]`. The sample configuration contains commented stdio and Streamable HTTP examples. Each server needs an explicit `allowed_tools` list. Stdio commands also need an executable allowlist entry. `env` values and HTTP `headers` values name credential environment variables; an Authorization reference contains the complete header value. No connector is discovered from a skill name or arbitrary URL. External writes with an uncertain outcome must not be blindly retried.
 
-Prompts, loaded skill instructions, input content read into context, and tool results can be sent to the selected model. Configured MCP servers receive their tool calls and arguments. Host scripts can make their own network requests. There is no product telemetry by default. Content logging is opt-in through `[diagnostics] log_content`; retained files and logs may contain task data.
+Prompts, loaded skill instructions, input content read into context, and tool results can be sent to the selected model. Configured MCP servers receive their tool calls and arguments. Host scripts can make their own network requests. There is no product telemetry by default. Content logging is opt-in through `[diagnostics] log_content` or `--log-content`. **Prompts are retained in `run.json`, and reports/artifacts remain on disk even when content logging is disabled.** Known credentials are redacted from operational records; retained files and logs may still contain sensitive task data.
+
+Model profiles, `[direct_model]`, and HTTP MCP configurations accept explicit `proxy_url`
+and `ca_bundle` settings. CA paths resolve relative to the configuration file. Proxy URLs
+must not contain credentials. Ambient `HTTP_PROXY`, `HTTPS_PROXY`, and certificate environment
+variables are not inherited; TLS verification cannot be disabled. Use an explicitly trusted
+PEM CA bundle for an enterprise certificate chain.
 
 ## Results and exit codes
 
-Each accepted execution creates a unique persistent bundle beneath the output directory. `result.md` is the report, `run.json` is the manifest, and retained artifacts are stored alongside them. The work directory is removed after cleanup unless diagnostic retention is enabled or incomplete work must be preserved. The JSON receipt identifies the run, status, exit code, primary output, report, manifest, artifacts, and errors. Tool chatter and diagnostics go to stderr.
+Each accepted execution creates a unique persistent bundle beneath the output directory.
+`result.md` is the diagnostic report, `run.json` is the manifest, and retained artifacts
+are stored alongside them with format extensions. The primary answer is always a separate,
+clean artifact, including default Markdown answers. The work directory is removed after cleanup unless diagnostic retention is enabled or incomplete work must be preserved. The JSON receipt identifies the run, status, exit code, primary output, report, manifest, artifacts, and errors. Tool chatter and diagnostics go to stderr. Normal runs show resolved model/output settings,
+phase transitions, model/tool activity, retry notices, and a five-second heartbeat with
+budget usage. `--quiet` suppresses progress. `--json` also applies to CLI parsing errors;
+help/version requests still produce their usual text.
 
 The manifest records OS details, the coordinator's Python version, and observed versions of external Python, Node.js, and shell runtimes. Before the first permitted launch of a recognized runtime, the runner probes its version once per executable identity. Each probe has at most two seconds of execution time within the existing command and run deadlines, plus the configured shutdown grace. Probe timeouts stop the run with exit 7. Unrecognized version output is recorded as unavailable; raw probe output is not included in the manifest or model context. These probes also cover local MCP servers and external validators.
 
 When an endpoint explicitly rejects a supported request field, the diagnostic identifies the missing tool-calling, image-input, or output-token-parameter capability and suggests a correction. Ambiguous rejections report that the capability could not be determined. Diagnostics do not repeat the endpoint's error body.
+
+Prefer `--output-file FILE` or `--output-directory DIRECTORY`; the latter creates missing
+directories. These options are mutually exclusive with each other and legacy `--output`.
+Format precedence is explicit `--format`, output-file extension, an explicitly named
+output filename in the prompt, then Markdown. For a request such as “Create a PDF”
+without a filename, specify `--format pdf`; arbitrary natural-language format inference
+is not performed. External format validators are checked before copying inputs or calling
+the model. A successful validator preflight proves availability, not artifact validity.
 
 `--output FILE` publishes the primary deliverable at that exact path while retaining the bundle. `--output DIRECTORY` publishes inside an existing directory using a unique generated filename with the validated format's extension. If the prompt explicitly names an output file, its basename is used inside that directory even when the model registers the artifact under another name. A path that does not yet exist is treated as a file path. Existing destination files remain unchanged unless `--overwrite` is supplied. Publication failure is nonzero and points to recoverable artifacts. If publication succeeds but final reporting fails, the published file remains. A report alone does not satisfy a requested binary deliverable.
 
@@ -176,9 +265,25 @@ When an endpoint explicitly rejects a supported request field, the diagnostic id
 
 The runner never pauses for follow-up input. Resolve a `needs_input` result and start a new invocation. Partial outputs do not imply success. Early argument errors may have no bundle; an uncatchable kill may leave a bundle without terminal status.
 
-Bundles remain local until you delete them. After reviewing or archiving a completed run, delete its individual bundle directory using your normal file manager or removal command. Confirm that the process has exited before deleting its files. Automatic retention and crash resumption are not implemented.
+Bundles remain local until explicitly deleted:
+
+```console
+skillrun runs list
+skillrun runs clean
+skillrun runs clean --yes
+```
+
+`runs list` includes disk usage. `runs clean` previews completed bundles; `--yes` confirms
+deletion. Active markers, unresolved owned processes, linked directories, malformed
+manifests, and unfinished/crashed runs are excluded. Published files outside bundles are
+not deleted. Use `-O/--output-dir` to select another bundle parent. Review/archive outputs
+first. Crashed bundles require manual inspection and cleanup after confirming that their
+processes have exited. Automatic retention and crash resumption are not implemented.
 
 ## Development and verification
+
+See [historical qualification evidence](docs/qualification-history.md) for reference
+benchmarks and native CI links. Those results are not measurements of later usability changes.
 
 ```console
 uv sync --locked --dev

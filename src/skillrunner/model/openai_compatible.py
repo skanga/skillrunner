@@ -19,6 +19,7 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpe
 from pydantic import SecretStr
 
 from skillrunner.config.models import ModelProfile
+from skillrunner.config.network import tls_verify
 from skillrunner.domain.errors import RunnerError
 from skillrunner.model.protocol import ModelReply, ModelToolCall, ModelUsage
 
@@ -266,7 +267,13 @@ class OpenAICompatibleAdapter:
         ):
             raise RunnerError("missing_credential", "Provide the configured model credential.")
         key = api_key.get_secret_value() if api_key and profile.auth_mode == "bearer" else ""
-        self._http = httpx.AsyncClient(transport=transport, follow_redirects=False, trust_env=False)
+        self._http = httpx.AsyncClient(
+            transport=transport,
+            follow_redirects=False,
+            trust_env=False,
+            proxy=profile.proxy_url,
+            verify=tls_verify(profile.ca_bundle),
+        )
         self._client = _ExplicitHeadersClient(
             base_url=profile.base_url,
             api_key=key,
@@ -373,6 +380,28 @@ class OpenAICompatibleAdapter:
 
     async def discover_capabilities(self, request_deadline: float) -> ResolvedCapabilities:
         discovery = self.profile.discovery
+        if (
+            discovery is None
+            and self.profile.context_window_tokens is not None
+            and self.profile.max_output_tokens is not None
+        ):
+            if self.profile.max_output_tokens > self.profile.context_window_tokens:
+                raise RunnerError(
+                    "unsupported_capability", "Maximum output exceeds context capacity."
+                )
+            if not self.profile.input_modalities or any(
+                not item.strip() for item in self.profile.input_modalities
+            ):
+                raise RunnerError("unsupported_capability", "Model input modalities are invalid.")
+            configured = {
+                key: getattr(self.profile, key)
+                for key in ("context_window_tokens", "max_output_tokens", "input_modalities")
+            }
+            sources = {
+                key: "configured" if key in self.profile.model_fields_set else "default"
+                for key in configured
+            }
+            return ResolvedCapabilities(self.profile, {}, configured, sources, "not_requested")
         path = (
             discovery.path
             if discovery

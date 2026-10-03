@@ -149,9 +149,11 @@ def test_inspection_rejected_packages(tmp_path, monkeypatch):
     assert not (tmp_path / "outputs").exists()
 
 
-def test_doctor_always_checks_connectivity(tmp_path, monkeypatch):
+def test_doctor_network_opt_in_checks_connectivity(tmp_path, monkeypatch):
     from skillrunner.cli import inspection
+    from tests.integration.test_coordinator import fixture
 
+    fixture(tmp_path)
     monkeypatch.chdir(tmp_path)
     called = []
 
@@ -160,7 +162,7 @@ def test_doctor_always_checks_connectivity(tmp_path, monkeypatch):
         return {"status": "ok", "model": "test"}
 
     monkeypatch.setattr(inspection, "check_model", check)
-    result = CliRunner().invoke(cli(), ["doctor", "-j"])
+    result = CliRunner().invoke(cli(), ["doctor", "--network", "-j"])
     assert result.exit_code == 0, result.output
     assert called == [True]
     assert json.loads(result.stdout)["model"]["status"] == "ok"

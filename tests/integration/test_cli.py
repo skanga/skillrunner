@@ -125,7 +125,7 @@ max_output_tokens = 2048
             if not key.startswith(("SKILLRUN_", "OPENAI_"))
         }
         completed = subprocess.run(
-            [str(command), "run", "Write a greeting", "--skill", "writer", "--json"],
+            [str(command), "run", "Write a greeting", "--skill", "writer", "--json", "--quiet"],
             cwd=tmp_path,
             env=environment,
             capture_output=True,
@@ -298,7 +298,9 @@ def test_all_five_resolved_limits_are_persisted_through_cli(tmp_path, monkeypatc
 
 def test_doctor_discovery_does_not_replace_connectivity(tmp_path, monkeypatch):
     from skillrunner.cli import inspection
+    from tests.integration.test_coordinator import fixture
 
+    fixture(tmp_path)
     monkeypatch.chdir(tmp_path)
     (tmp_path / "skillrun.toml").write_text("""
 default_model = "local"
@@ -308,6 +310,8 @@ model = "arbitrary"
 auth_mode = "none"
 context_window_tokens = 4096
 max_output_tokens = 100
+[models.local.discovery]
+path = "metadata"
 """)
     requests = []
 
@@ -318,12 +322,29 @@ max_output_tokens = 100
             return httpx.Response(404)
         body = json.loads(request.content)
         assert body["model"] == "arbitrary"
-        assert body.get("max_completion_tokens", body.get("max_tokens")) == 8
+        assert body.get("max_completion_tokens", body.get("max_tokens")) == 100
+        assert body["tools"][0]["function"]["name"] == "skillrun_probe"
         return httpx.Response(
             200,
             json={
                 "choices": [
-                    {"finish_reason": "stop", "message": {"role": "assistant", "content": "OK"}}
+                    {
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "probe",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "skillrun_probe",
+                                        "arguments": '{"ok":true}',
+                                    },
+                                }
+                            ],
+                        },
+                    }
                 ]
             },
         )
@@ -334,7 +355,7 @@ max_output_tokens = 100
         )
 
     monkeypatch.setattr(inspection, "OpenAICompatibleAdapter", factory)
-    result = CliRunner().invoke(app, ["doctor", "-j"])
+    result = CliRunner().invoke(app, ["doctor", "--network", "-j"])
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["model"]["connectivity"] == "verified"
     assert [request.method for request in requests] == ["GET", "POST"]
@@ -343,6 +364,9 @@ max_output_tokens = 100
 
 
 def test_doctor_missing_credential_is_not_success(tmp_path, monkeypatch):
+    from tests.integration.test_coordinator import fixture
+
+    fixture(tmp_path)
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     (tmp_path / "skillrun.toml").write_text("""

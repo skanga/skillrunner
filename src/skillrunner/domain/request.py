@@ -5,6 +5,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
+from skillrunner.domain.filenames import requested_output_filename
+
 FORMAT_ALIASES = {"markdown": "md", "text": "txt"}
 KNOWN_FORMATS = {
     "md",
@@ -29,8 +31,10 @@ class RunRequest(BaseModel):
     invocation_directory: Path
     prompt_source: Literal["argument", "file", "stdin"] = "argument"
     inputs: list[Path] = Field(default_factory=list)
+    input_excludes: list[str] = Field(default_factory=list)
     required_skills: list[str] = Field(default_factory=list)
     output: Path | None = None
+    output_kind: Literal["auto", "file", "directory"] = "auto"
     format: str | None = None
     overwrite: bool = False
     _output_is_directory: bool = PrivateAttr(default=False)
@@ -53,7 +57,17 @@ class RunRequest(BaseModel):
         self.inputs = [(self.invocation_directory / path).absolute() for path in self.inputs]
         if self.output is not None:
             self.output = (self.invocation_directory / self.output).absolute()
-            self._output_is_directory = self.output.is_dir()
+            if self.output_kind == "file" and self.output.is_dir():
+                raise ValueError("--output-file requires a file destination.")
+            if (
+                self.output_kind == "directory"
+                and self.output.exists()
+                and not self.output.is_dir()
+            ):
+                raise ValueError("--output-directory requires a directory destination.")
+            self._output_is_directory = self.output_kind == "directory" or (
+                self.output_kind == "auto" and self.output.is_dir()
+            )
         suffix = (
             self.output.suffix.lstrip(".").lower()
             if self.output and not self.output_is_directory
@@ -69,5 +83,8 @@ class RunRequest(BaseModel):
         else:
             if suffix and suffix not in KNOWN_FORMATS:
                 raise ValueError("Unknown output extension requires an explicit format.")
-            self.format = suffix or "md"
+            named = requested_output_filename(self.prompt)
+            inferred = Path(named).suffix.lstrip(".").lower() if named else ""
+            inferred = FORMAT_ALIASES.get(inferred, inferred)
+            self.format = suffix or (inferred if inferred in KNOWN_FORMATS else "md")
         return self
